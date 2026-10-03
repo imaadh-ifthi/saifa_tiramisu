@@ -1,0 +1,63 @@
+======================================================================
+QUANT EDGE 1.0: WAVELET-COPULA RISK FRAMEWORK SUMMARY
+======================================================================
+
+Backtest settings:
+Training window: 750
+Test days: 60
+Monte Carlo simulations per forecast: 1000
+Confidence level: 99%
+Wavelet levels: 3
+
+VaR coverage tests:
+Model Kupiec LR: 0.2244, p-value: 0.6357, violation rate: 0.0167
+Benchmark Kupiec LR: 12.7369, p-value: 0.0004, violation rate: 0.0833
+
+VaR independence tests:
+Model Christoffersen LR: 0.0345, p-value: 0.8527
+Benchmark Christoffersen LR: 0.9273, p-value: 0.3356
+
+Expected Shortfall joint loss:
+Mean FZ loss model: -2.966101
+Mean FZ loss benchmark: -7.736977
+Diebold-Mariano stat: 2.1737, p-value: 0.0297
+
+Tail dependence by horizon:
+D1: lower tail = 0.0668, upper tail = 0.0641
+D2: lower tail = 0.0633, upper tail = 0.0628
+D3: lower tail = 0.0689, upper tail = 0.0691
+S3: lower tail = 0.0657, upper tail = 0.0669
+
+Economic interpretation:
+Average model 99% ES: -0.0714
+Average benchmark 99% ES: -0.0269
+Benchmark ES underestimation relative to model: 165.47%
+Lower tail dependence ratio longest/shortest scale: 0.98x
+
+======================================================================
+CONCRETE RECOMMENDATION FOR RISK MANAGERS
+======================================================================
+
+
+Do not use one dependence structure for all risk horizons.
+
+The framework estimates tail dependence separately at short, medium, and long
+timescales. If lower tail dependence is higher at longer scales, then daily
+or aggregate risk models can overstate diversification exactly when systemic
+stress persists over several weeks.
+
+Actionable rule:
+
+1. Keep short-term liquidity and intraday limits based on high-frequency risk
+   metrics, but do not use them to size systemic tail hedges.
+
+2. Size strategic tail hedges, drawdown controls, and capital buffers using
+   the low-frequency Expected Shortfall estimate.
+
+3. If the low-frequency ES is 0.0714 while the aggregate
+   Gaussian benchmark ES is only 0.0269, then relying on
+   the aggregate benchmark may understate tail risk by approximately
+   165.5%.
+
+4. Review hedge ratios whenever the long-scale lower tail dependence rises
+   materially above the short-scale estimate.
