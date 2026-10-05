@@ -1,19 +1,11 @@
 """
-Reporting module.
-
-Produces:
-    - CSV outputs;
-    - PNG figures;
-    - summary.txt with statistical tests and recommendation.
+Reporting module for Quant Edge 1.0 Ablation Framework.
 """
 
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
-
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -27,9 +19,6 @@ from src.backtests import (
 
 
 def _scale_sort_key(scale_name: str):
-    """
-    Sort D1, D2, ..., D5, S5.
-    """
     if scale_name.startswith("D"):
         try:
             return (0, int(scale_name[1:]))
@@ -42,277 +31,189 @@ def save_report(results: pd.DataFrame, tail_df: pd.DataFrame, cfg):
     """
     Save all report artifacts.
     """
-    RESULTS_DIR = Path(cfg.RESULTS_DIR)
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR_PATH = Path(cfg.RESULTS_DIR)
+    RESULTS_DIR_PATH.mkdir(parents=True, exist_ok=True)
 
     results = results.copy()
+    
+    models = ["M0", "M1", "M2", "M3"]
+    model_labels = {
+        "M0": "Historical Simulation Benchmark",
+        "M1": "Heavy-Tail Marginals",
+        "M2": "Wavelet + Within-Scale",
+        "M3": "Full Cross-Scale Multiscale"
+    }
 
     # Clean forecasts.
-    for col in ["model_var", "model_es", "bench_var", "bench_es"]:
-        results[col] = (
-            results[col]
-            .replace([np.inf, -np.inf], np.nan)
-            .ffill()
-            .bfill()
-            .fillna(0.0)
-        )
+    for m in models:
+        for col in [f"{m}_var", f"{m}_es"]:
+            results[col] = (
+                results[col]
+                .replace([np.inf, -np.inf], np.nan)
+                .ffill()
+                .bfill()
+                .fillna(0.0)
+            )
 
-    # --------------------------------------------------------------
-    # Save raw outputs
-    # --------------------------------------------------------------
-    results.to_csv(RESULTS_DIR / "backtest_results.csv", index=False)
-
-    if not tail_df.empty:
-        tail_df.to_csv(RESULTS_DIR / "tail_dependence_by_scale.csv", index=False)
-
-    # --------------------------------------------------------------
-    # Statistical tests
-    # --------------------------------------------------------------
     actual = results["actual_return"].values
 
-    model_var = results["model_var"].values
-    model_es = results["model_es"].values
+    # 1. Output model_comparison_by_window.csv
+    window_records = []
+    for idx, row in results.iterrows():
+        for m in models:
+            var_val = row[f"{m}_var"]
+            es_val = row[f"{m}_es"]
+            ret = row["actual_return"]
+            breach = 1 if ret < var_val else 0
+            
+            window_records.append({
+                "forecast_date": row["date"],
+                "training_window_end": row["train_end"],
+                "model": m,
+                "model_name": model_labels[m],
+                "VaR": var_val,
+                "ES": es_val,
+                "realized_return": ret,
+                "is_breach": breach
+            })
+    
+    pd.DataFrame(window_records).to_csv(RESULTS_DIR_PATH / "model_comparison_by_window.csv", index=False)
 
-    bench_var = results["bench_var"].values
-    bench_es = results["bench_es"].values
-
-    kupiec_model = kupiec_test(actual, model_var, cfg.ALPHA)
-    kupiec_bench = kupiec_test(actual, bench_var, cfg.ALPHA)
-
-    christ_model = christoffersen_test(actual, model_var, cfg.ALPHA)
-    christ_bench = christoffersen_test(actual, bench_var, cfg.ALPHA)
-
-    fz_model = fissler_ziegel_loss(actual, model_var, model_es, cfg.ALPHA)
-    fz_bench = fissler_ziegel_loss(actual, bench_var, bench_es, cfg.ALPHA)
-
-    fz_model = np.nan_to_num(fz_model, nan=1e6, posinf=1e6, neginf=-1e6)
-    fz_bench = np.nan_to_num(fz_bench, nan=1e6, posinf=1e6, neginf=-1e6)
-
-    dm = diebold_mariano_test(fz_model, fz_bench)
-
-    # --------------------------------------------------------------
-    # Tail dependence summary
-    # --------------------------------------------------------------
-    tail_ratio = np.nan
-    lambda_first = np.nan
-    lambda_last = np.nan
-    scales = []
-
-    if not tail_df.empty:
-        lower_cols = [c for c in tail_df.columns if c.endswith("_L")]
-        scales = sorted([c[:-2] for c in lower_cols], key=_scale_sort_key)
-
-        if len(scales) >= 2:
-            mean_tail = tail_df.mean(numeric_only=True)
-
-            lambda_first = float(mean_tail.get(f"{scales[0]}_L", np.nan))
-            lambda_last = float(mean_tail.get(f"{scales[-1]}_L", np.nan))
-
-            if np.isfinite(lambda_first) and lambda_first > 1e-8:
-                tail_ratio = lambda_last / lambda_first
-
-    # --------------------------------------------------------------
-    # Expected Shortfall comparison
-    # --------------------------------------------------------------
-    mean_model_es = float(np.mean(model_es))
-    mean_bench_es = float(np.mean(bench_es))
-
-    if mean_model_es < 0 and mean_bench_es < 0:
-        es_underestimation = abs(mean_model_es) / abs(mean_bench_es) - 1.0
-    else:
-        es_underestimation = np.nan
-
-    # --------------------------------------------------------------
-    # Figure 1: tail dependence by horizon
-    # --------------------------------------------------------------
-    if not tail_df.empty and len(scales) > 0:
-        mean_tail = tail_df.mean(numeric_only=True)
-
-        lower_vals = []
-        upper_vals = []
-
-        for s in scales:
-            lower_vals.append(float(mean_tail.get(f"{s}_L", np.nan)))
-            upper_vals.append(float(mean_tail.get(f"{s}_U", np.nan)))
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        ax.plot(scales, lower_vals, marker="o", color="darkred", label="Lower tail dependence")
-        ax.plot(scales, upper_vals, marker="s", color="steelblue", label="Upper tail dependence")
-
-        ax.set_xlabel("Timescale / Horizon")
-        ax.set_ylabel("Average pairwise tail dependence")
-        ax.set_title("Tail Dependence Across Investment Horizons")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-
-        fig.tight_layout()
-        fig.savefig(RESULTS_DIR / "tail_dependence_by_horizon.png", dpi=200)
-        plt.close(fig)
-
-    # --------------------------------------------------------------
-    # Figure 2: VaR forecasts vs actual returns
-    # --------------------------------------------------------------
-    plot_df = results.tail(252).copy()
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-
-    ax.plot(
-        plot_df["date"],
-        plot_df["actual_return"],
-        color="black",
-        alpha=0.65,
-        label="Portfolio return",
-    )
-
-    ax.plot(
-        plot_df["date"],
-        plot_df["model_var"],
-        color="darkred",
-        label="Wavelet-vine 99% VaR",
-    )
-
-    ax.plot(
-        plot_df["date"],
-        plot_df["bench_var"],
-        color="steelblue",
-        label="Gaussian benchmark 99% VaR",
-        linestyle="--",
-    )
-
-    ax.set_title("Out-of-Sample 99% VaR Forecasts")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Return")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-
+    # 2. Output model_comparison.csv
+    summary_records = []
+    
+    expected_breaches = len(actual) * cfg.ALPHA
+    
+    for m in models:
+        m_var = results[f"{m}_var"].values
+        m_es = results[f"{m}_es"].values
+        
+        breaches = actual < m_var
+        obs_breaches = np.sum(breaches)
+        breach_rate = obs_breaches / len(actual)
+        
+        avg_var = np.mean(m_var)
+        avg_es = np.mean(m_es)
+        avg_realized_loss = np.mean(actual[breaches]) if obs_breaches > 0 else np.nan
+        
+        kt = kupiec_test(actual, m_var, cfg.ALPHA)
+        ct = christoffersen_test(actual, m_var, cfg.ALPHA)
+        fz = fissler_ziegel_loss(actual, m_var, m_es, cfg.ALPHA)
+        avg_fz = np.mean(np.nan_to_num(fz, nan=1e6, posinf=1e6, neginf=-1e6))
+        
+        summary_records.append({
+            "model": m,
+            "model_name": model_labels[m],
+            "vaR_level": 1 - cfg.ALPHA,
+            "expected_breaches": expected_breaches,
+            "observed_breaches": obs_breaches,
+            "breach_rate": breach_rate,
+            "average_var": avg_var,
+            "average_es": avg_es,
+            "average_realized_breach_loss": avg_realized_loss,
+            "coverage_test_statistic": kt["stat"],
+            "coverage_test_pvalue": kt["p_value"],
+            "independence_test_statistic": ct["stat"],
+            "independence_test_pvalue": ct["p_value"],
+            "es_score": avg_fz
+        })
+        
+    df_summary = pd.DataFrame(summary_records)
+    df_summary.to_csv(RESULTS_DIR_PATH / "model_comparison.csv", index=False)
+    
+    # 3. Figures
+    # FIGURE 1: OOS VaR time series for all models
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(results["date"], actual, color="black", alpha=0.5, label="Realized Portfolio Return")
+    colors = {"M0": "blue", "M1": "green", "M2": "orange", "M3": "red"}
+    styles = {"M0": "--", "M1": "-.", "M2": ":", "M3": "-"}
+    
+    for m in models:
+        ax.plot(results["date"], results[f"{m}_var"], color=colors[m], linestyle=styles[m], label=model_labels[m])
+        
+    ax.set_title(f"Out-of-Sample {100*(1-cfg.ALPHA):.0f}% VaR Forecasts")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
     fig.autofmt_xdate()
     fig.tight_layout()
-    fig.savefig(RESULTS_DIR / "var_forecasts.png", dpi=200)
+    fig.savefig(RESULTS_DIR_PATH / "oos_var_timeseries.png", dpi=200)
     plt.close(fig)
-
-    # --------------------------------------------------------------
-    # Figure 3: cumulative Fissler-Ziegel loss
-    # --------------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(10, 5))
-
-    ax.plot(
-        results["date"],
-        np.cumsum(fz_model),
-        label="Wavelet-vine model",
-        color="darkred",
-    )
-
-    ax.plot(
-        results["date"],
-        np.cumsum(fz_bench),
-        label="Gaussian benchmark",
-        color="steelblue",
-        linestyle="--",
-    )
-
-    ax.set_title("Cumulative Fissler-Ziegel Joint VaR/ES Loss")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Cumulative loss")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-
-    fig.autofmt_xdate()
+    
+    # FIGURE 2: Average / distribution of OOS VaR by model
+    fig, ax = plt.subplots(figsize=(8, 5))
+    var_data = [results[f"{m}_var"].values for m in models]
+    ax.boxplot(var_data, tick_labels=[model_labels[m] for m in models])
+    ax.set_title("Distribution of OOS VaR Estimates")
+    ax.set_ylabel("VaR")
+    plt.xticks(rotation=15, ha='right')
     fig.tight_layout()
-    fig.savefig(RESULTS_DIR / "fissler_ziegel_cumulative_loss.png", dpi=200)
+    fig.savefig(RESULTS_DIR_PATH / "var_distribution.png", dpi=200)
     plt.close(fig)
 
-    # --------------------------------------------------------------
-    # Summary text
-    # --------------------------------------------------------------
-    summary_lines = []
+    # FIGURE 3: Average OOS ES by model
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar([model_labels[m] for m in models], df_summary["average_es"].values, color=["blue", "green", "orange", "red"])
+    ax.set_title("Average Expected Shortfall")
+    ax.set_ylabel("Expected Shortfall")
+    plt.xticks(rotation=15, ha='right')
+    fig.tight_layout()
+    fig.savefig(RESULTS_DIR_PATH / "avg_es.png", dpi=200)
+    plt.close(fig)
 
-    summary_lines.append("=" * 70)
-    summary_lines.append("QUANT EDGE 1.0: WAVELET-COPULA RISK FRAMEWORK SUMMARY")
-    summary_lines.append("=" * 70)
-    summary_lines.append("")
+    # FIGURE 4: Observed vs nominal VaR breach rate
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar([model_labels[m] for m in models], df_summary["breach_rate"].values, color=["blue", "green", "orange", "red"])
+    ax.axhline(cfg.ALPHA, color="black", linestyle="--", label="Nominal Target")
+    ax.set_title("Empirical VaR Breach Rate")
+    ax.set_ylabel("Breach Rate")
+    ax.legend()
+    plt.xticks(rotation=15, ha='right')
+    fig.tight_layout()
+    fig.savefig(RESULTS_DIR_PATH / "breach_rate.png", dpi=200)
+    plt.close(fig)
+    
+    # FIGURE 5: Ablation plot (Benchmark -> Heavy-tail -> Wavelet -> Full model)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot([model_labels[m] for m in models], df_summary["es_score"].values, marker='o', color='purple')
+    ax.set_title("Fissler-Ziegel Joint Loss Progression (Lower is better)")
+    ax.set_ylabel("Average ES Score")
+    plt.xticks(rotation=15, ha='right')
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(RESULTS_DIR_PATH / "ablation_es_score.png", dpi=200)
+    plt.close(fig)
 
-    summary_lines.append("Backtest settings:")
-    summary_lines.append(f"Training window: {cfg.TRAIN_WINDOW}")
-    summary_lines.append(f"Test days: {len(results)}")
-    summary_lines.append(f"Monte Carlo simulations per forecast: {cfg.N_SIM}")
-    summary_lines.append(f"Confidence level: {100 * (1 - cfg.ALPHA):.0f}%")
-    summary_lines.append(f"Wavelet levels: {cfg.LEVELS}")
-    summary_lines.append("")
+    # 4. Write summary.txt
+    s = []
+    s.append("=" * 70)
+    s.append("QUANT EDGE 1.0: ABLATION FRAMEWORK SUMMARY")
+    s.append("=" * 70)
+    s.append(f"Training Window: {cfg.TRAIN_WINDOW}")
+    s.append(f"OOS Days: {len(results)}")
+    
+    s.append("\n--- ABLATION DELTAS ---")
+    m0, m1, m2, m3 = df_summary.iloc[0], df_summary.iloc[1], df_summary.iloc[2], df_summary.iloc[3]
+    
+    def format_delta(m_post, m_pre, name):
+        d_var = m_post['average_var'] - m_pre['average_var']
+        d_es = m_post['average_es'] - m_pre['average_es']
+        d_breach = m_post['breach_rate'] - m_pre['breach_rate']
+        return f"{name}:\n  Avg VaR Diff: {d_var:.4f}\n  Avg ES Diff: {d_es:.4f}\n  Breach Rate Diff: {d_breach:.4f}\n"
 
-    summary_lines.append("VaR coverage tests:")
-    summary_lines.append(
-        f"Model Kupiec LR: {kupiec_model['stat']:.4f}, "
-        f"p-value: {kupiec_model['p_value']:.4f}, "
-        f"violation rate: {kupiec_model['violation_rate']:.4f}"
-    )
-    summary_lines.append(
-        f"Benchmark Kupiec LR: {kupiec_bench['stat']:.4f}, "
-        f"p-value: {kupiec_bench['p_value']:.4f}, "
-        f"violation rate: {kupiec_bench['violation_rate']:.4f}"
-    )
-    summary_lines.append("")
-
-    summary_lines.append("VaR independence tests:")
-    summary_lines.append(
-        f"Model Christoffersen LR: {christ_model['stat']:.4f}, "
-        f"p-value: {christ_model['p_value']:.4f}"
-    )
-    summary_lines.append(
-        f"Benchmark Christoffersen LR: {christ_bench['stat']:.4f}, "
-        f"p-value: {christ_bench['p_value']:.4f}"
-    )
-    summary_lines.append("")
-
-    summary_lines.append("Expected Shortfall joint loss:")
-    summary_lines.append(f"Mean FZ loss model: {np.mean(fz_model):.6f}")
-    summary_lines.append(f"Mean FZ loss benchmark: {np.mean(fz_bench):.6f}")
-    summary_lines.append(
-        f"Diebold-Mariano stat: {dm['stat']:.4f}, p-value: {dm['p_value']:.4f}"
-    )
-    summary_lines.append("")
-
-    summary_lines.append("Tail dependence by horizon:")
-    if not tail_df.empty and len(scales) > 0:
-        mean_tail = tail_df.mean(numeric_only=True)
-        for s in scales:
-            l_val = mean_tail.get(f"{s}_L", np.nan)
-            u_val = mean_tail.get(f"{s}_U", np.nan)
-            summary_lines.append(
-                f"{s}: lower tail = {l_val:.4f}, upper tail = {u_val:.4f}"
-            )
-    else:
-        summary_lines.append("Tail dependence table unavailable.")
-    summary_lines.append("")
-
-    summary_lines.append("Economic interpretation:")
-    summary_lines.append(
-        f"Average model 99% ES: {mean_model_es:.4f}"
-    )
-    summary_lines.append(
-        f"Average benchmark 99% ES: {mean_bench_es:.4f}"
-    )
-
-    if np.isfinite(es_underestimation):
-        summary_lines.append(
-            f"Benchmark ES underestimation relative to model: {100 * es_underestimation:.2f}%"
-        )
-    else:
-        summary_lines.append("Benchmark ES underestimation: unavailable.")
-
-    if np.isfinite(tail_ratio):
-        summary_lines.append(
-            f"Lower tail dependence ratio longest/shortest scale: {tail_ratio:.2f}x"
-        )
-    else:
-        summary_lines.append("Lower tail dependence ratio: unavailable.")
-
-    summary_lines.append("")
-    summary_lines.append("=" * 70)
-    summary_lines.append("CONCRETE RECOMMENDATION FOR RISK MANAGERS")
-    summary_lines.append("=" * 70)
-    summary_lines.append("")
-
+    s.append(format_delta(m1, m0, "M1 - M0 (Heavy-tail vs Benchmark)"))
+    s.append(format_delta(m2, m1, "M2 - M1 (Wavelets vs Heavy-tail)"))
+    s.append(format_delta(m3, m2, "M3 - M2 (Cross-Scale vs Within-Scale)"))
+    s.append(format_delta(m3, m0, "M3 - M0 (Full Model vs Benchmark)"))
+    
+    s.append("\n--- THE MOST IMPORTANT COMPARISON (IGNORE HORIZON DEPENDENCE VS FULL MODEL) ---")
+    s.append("Model M1 (ignores multiscale/cross-scale) vs Model M3 (current FULL model).")
+    s.append(f"VaR (M1): {m1['average_var']:.4f}  | VaR (M3): {m3['average_var']:.4f}")
+    s.append(f"ES (M1): {m1['average_es']:.4f}  | ES (M3): {m3['average_es']:.4f}")
+    s.append(f"Breaches (M1): {m1['observed_breaches']}  | Breaches (M3): {m3['observed_breaches']}")
+    
+    s.append("\n" + "=" * 70)
+    s.append("CONCRETE RECOMMENDATION FOR RISK MANAGERS")
+    s.append("=" * 70 + "\n")
     recommendation = f"""
 Do not use one dependence structure for all risk horizons.
 
@@ -329,22 +230,15 @@ Actionable rule:
 2. Size strategic tail hedges, drawdown controls, and capital buffers using
    the low-frequency Expected Shortfall estimate.
 
-3. If the low-frequency ES is {abs(mean_model_es):.4f} while the aggregate
-   Gaussian benchmark ES is only {abs(mean_bench_es):.4f}, then relying on
-   the aggregate benchmark may understate tail risk by approximately
-   {100 * max(es_underestimation, 0.0):.1f}%.
-
-4. Review hedge ratios whenever the long-scale lower tail dependence rises
-   materially above the short-scale estimate.
+3. If the low-frequency ES differs from the aggregate benchmark, rely on
+   the structure that successfully incorporates cross-horizon coupling to
+   prevent systemic risk underestimation.
 """
-
-    summary_lines.append(recommendation)
-
-    summary_text = "\n".join(summary_lines)
-
-    with open(RESULTS_DIR / "summary.txt", "w", encoding="utf-8") as f:
+    s.append(recommendation)
+    
+    summary_text = "\n".join(s)
+    with open(RESULTS_DIR_PATH / "summary.txt", "w", encoding="utf-8") as f:
         f.write(summary_text)
 
     print(summary_text)
-
     return summary_text

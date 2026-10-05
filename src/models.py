@@ -28,11 +28,13 @@ class MultiScaleWaveletVine:
         wavelet: str = "db4",
         seed: int = 42,
         tail_quantile: float = 0.95,
+        use_cross_scale: bool = True,
     ):
         self.levels = int(levels)
         self.wavelet = wavelet
         self.seed = int(seed)
         self.tail_quantile = float(tail_quantile)
+        self.use_cross_scale = use_cross_scale
 
         self.scale_models = {}
         self.tail_deps = {}
@@ -103,9 +105,10 @@ class MultiScaleWaveletVine:
         self.scale_order.append(scale_name)
 
         # Fit cross-scale model
-        stress_matrix = np.column_stack(stress_matrix_cols)
-        self.cross_scale_coupler = CrossScaleCopulaCoupler(scale_names=self.scale_order)
-        self.cross_scale_coupler.fit(stress_matrix)
+        if self.use_cross_scale:
+            stress_matrix = np.column_stack(stress_matrix_cols)
+            self.cross_scale_coupler = CrossScaleCopulaCoupler(scale_names=self.scale_order)
+            self.cross_scale_coupler.fit(stress_matrix)
 
         return self
 
@@ -260,3 +263,71 @@ class GaussianAggregateBenchmark:
         portfolio_returns = X @ np.asarray(weights, dtype=float)
 
         return portfolio_returns
+
+
+class HistoricalSimulationBenchmark:
+    """
+    M0: Historical Simulation benchmark.
+    No GARCH, no EVT, no copulas, no wavelets. Just empirical portfolio returns.
+    """
+    def __init__(self):
+        self.returns = None
+        
+    def fit(self, returns):
+        self.returns = returns.dropna()
+        return self
+        
+    def simulate_portfolio(self, n_sim: int, weights: np.ndarray, seed: int = 1):
+        # We don't use Monte Carlo. We just return the empirical historical portfolio returns.
+        weights = np.asarray(weights, dtype=float)
+        return self.returns.values @ weights
+
+
+class HeavyTailMarginalModel:
+    """
+    M1: Heavy-tail marginal model (AR-GARCH-EVT + VineCopula) applied to raw returns.
+    No multiscale decomposition.
+    """
+    def __init__(self, tail_quantile=0.95, seed=42):
+        self.tail_quantile = tail_quantile
+        self.seed = seed
+        self.marginals = []
+        self.copula = None
+        self.n_assets = 0
+
+    def fit(self, returns):
+        returns = returns.dropna()
+        self.asset_names = list(returns.columns)
+        self.n_assets = len(self.asset_names)
+        
+        X = returns.values
+        U_list = []
+        for i in range(self.n_assets):
+            m = MarginalARQGARCH(tail_quantile=self.tail_quantile)
+            m.fit(X[:, i])
+            u = m.transform(X[:, i])
+            self.marginals.append(m)
+            U_list.append(u)
+            
+        U = np.column_stack(U_list)
+        self.copula = VineCopulaModel()
+        self.copula.fit(U)
+        return self
+        
+    def simulate_portfolio(self, n_sim: int, weights: np.ndarray, seed: int = 42):
+        n_sim = int(n_sim)
+        weights = np.asarray(weights, dtype=float)
+        
+        U_sim = self.copula.simulate(n_sim, seed=seed)
+        
+        if U_sim.shape[0] < n_sim:
+            pad = np.full((n_sim - U_sim.shape[0], U_sim.shape[1]), 0.5)
+            U_sim = np.vstack([U_sim, pad])
+        elif U_sim.shape[0] > n_sim:
+            U_sim = U_sim[:n_sim]
+            
+        sim_returns = np.zeros((n_sim, self.n_assets), dtype=float)
+        for i, m in enumerate(self.marginals):
+            sim_returns[:, i] = m.forecast_component(U_sim[:, i])
+            
+        return sim_returns @ weights
