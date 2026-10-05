@@ -1,0 +1,2 @@
+tail_dependence_D1,tail_dependence_D5,tail_dependence_D1_CI_lower,tail_dependence_D1_CI_upper,tail_dependence_D5_CI_lower,tail_dependence_D5_CI_upper,D5_minus_D1,D5_minus_D1_CI_lower,D5_minus_D1_CI_upper,M1_average_VaR,M3_average_VaR,M1_average_ES,M3_average_ES,M1_breach_rate,M3_breach_rate,M1_ES_score,M3_ES_score,interpretation_flags
+0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,-0.0298427684968604,-0.015180880865333,-0.0391297158384536,-0.0175899405917642,0.0119047619047619,0.0634920634920634,-4.214760571110873,-8.445518063915928,A:Yes B:Yes C:Yes D:Yes

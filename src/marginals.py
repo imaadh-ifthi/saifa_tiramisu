@@ -136,6 +136,9 @@ class MarginalARQGARCH:
                 warnings.simplefilter("ignore")
                 res = am.fit(disp="off", options={"maxiter": 200})
 
+            if res.convergence_flag != 0:
+                raise RuntimeError("GARCH optimizer failed to converge.")
+
             params = res.params.to_dict()
 
             mu = self._get_param(params, ["mu", "constant", "c"], 0.0)

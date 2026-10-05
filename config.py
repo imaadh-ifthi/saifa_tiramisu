@@ -60,7 +60,7 @@ LEVELS = 5
 # Backtest settings
 # ------------------------------------------------------------
 TRAIN_WINDOW = 1000
-TEST_DAYS = 252
+TEST_DAYS = None
 REFIT_EVERY = 21
 
 

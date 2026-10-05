@@ -140,6 +140,9 @@ def main():
     results, tail_df = run_backtest(returns, cfg)
 
     save_report(results, tail_df, cfg)
+    
+    from src.robustness import run_robustness
+    run_robustness(returns, cfg)
 
     print("\n[Done] Outputs saved to results/")
 
