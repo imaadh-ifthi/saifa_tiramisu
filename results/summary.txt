@@ -10,15 +10,15 @@ Confidence level: 99%
 Wavelet levels: 5
 
 VaR coverage tests:
-Model Kupiec LR: 129.2154, p-value: 0.0000, violation rate: 0.1429
+Model Kupiec LR: 123.6413, p-value: 0.0000, violation rate: 0.1389
 Benchmark Kupiec LR: 1.9165, p-value: 0.1662, violation rate: 0.0198
 
 VaR independence tests:
-Model Christoffersen LR: 50.3287, p-value: 0.0000
+Model Christoffersen LR: 53.7286, p-value: 0.0000
 Benchmark Christoffersen LR: 0.2033, p-value: 0.6521
 
 Expected Shortfall joint loss:
-Mean FZ loss model: -51628454477668.882812
+Mean FZ loss model: -51616142289948.851562
 Mean FZ loss benchmark: -4.157623
 Diebold-Mariano stat: -2.8050, p-value: 0.0050
 
@@ -31,7 +31,7 @@ D5: lower tail = 0.0903, upper tail = 0.0919
 S5: lower tail = 0.0845, upper tail = 0.0854
 
 Economic interpretation:
-Average model 99% ES: 0.4973
+Average model 99% ES: 0.4961
 Average benchmark 99% ES: -0.0275
 Benchmark ES underestimation: unavailable.
 Lower tail dependence ratio longest/shortest scale: 1.35x
@@ -56,7 +56,7 @@ Actionable rule:
 2. Size strategic tail hedges, drawdown controls, and capital buffers using
    the low-frequency Expected Shortfall estimate.
 
-3. If the low-frequency ES is 0.4973 while the aggregate
+3. If the low-frequency ES is 0.4961 while the aggregate
    Gaussian benchmark ES is only 0.0275, then relying on
    the aggregate benchmark may understate tail risk by approximately
    nan%.

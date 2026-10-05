@@ -14,7 +14,8 @@ from src.modwt import AdditiveMODWT
 from src.marginals import MarginalARQGARCH
 from src.copulas import VineCopulaModel
 from src.utils import regularize_corr
-
+from src.cross_scale import CrossScaleCopulaCoupler
+from scipy.stats import norm
 
 class MultiScaleWaveletVine:
     """
@@ -75,6 +76,7 @@ class MultiScaleWaveletVine:
         self.scale_models = {}
         self.tail_deps = {}
         self.scale_order = []
+        stress_matrix_cols = []
 
         for j in range(self.levels):
             scale_name = f"D{j + 1}"
@@ -83,15 +85,24 @@ class MultiScaleWaveletVine:
                 [details_by_asset[i][j] for i in range(self.n_assets)]
             )
 
-            self._fit_scale(scale_name, X)
+            U = self._fit_scale(scale_name, X)
+            U_clipped = np.clip(U, 1e-6, 1.0 - 1e-6)
+            stress_matrix_cols.append(np.mean(norm.ppf(U_clipped), axis=1))
             self.scale_order.append(scale_name)
 
         # Smooth component.
         scale_name = f"S{self.levels}"
         X_smooth = np.column_stack(smooth_by_asset)
 
-        self._fit_scale(scale_name, X_smooth)
+        U = self._fit_scale(scale_name, X_smooth)
+        U_clipped = np.clip(U, 1e-6, 1.0 - 1e-6)
+        stress_matrix_cols.append(np.mean(norm.ppf(U_clipped), axis=1))
         self.scale_order.append(scale_name)
+
+        # Fit cross-scale model
+        stress_matrix = np.column_stack(stress_matrix_cols)
+        self.cross_scale_coupler = CrossScaleCopulaCoupler(scale_names=self.scale_order)
+        self.cross_scale_coupler.fit(stress_matrix)
 
         return self
 
@@ -131,24 +142,25 @@ class MultiScaleWaveletVine:
         }
 
         self.tail_deps[scale_name] = (lambda_L, lambda_U)
+        
+        return U
 
     # ------------------------------------------------------------------
     # Monte Carlo simulation
     # ------------------------------------------------------------------
     def simulate_portfolio(self, n_sim: int, weights: np.ndarray, seed: int = 42):
         """
-        Simulate portfolio returns by simulating each scale and reconstructing.
+        Simulate portfolio returns by simulating each scale, coupling them, and reconstructing.
         """
         n_sim = int(n_sim)
         weights = np.asarray(weights, dtype=float)
 
-        total_asset_returns = np.zeros((n_sim, self.n_assets), dtype=float)
+        scale_uniform_samples = {}
 
         for idx, scale_name in enumerate(self.scale_order):
             model = self.scale_models[scale_name]
 
             cop = model["copula"]
-            marginals = model["marginals"]
 
             U = cop.simulate(n_sim, seed=seed + idx + 1)
 
@@ -158,11 +170,26 @@ class MultiScaleWaveletVine:
                 U = np.vstack([U, pad])
             elif U.shape[0] > n_sim:
                 U = U[:n_sim]
+                
+            scale_uniform_samples[scale_name] = U
+
+        # Cross-scale coupling
+        if hasattr(self, 'cross_scale_coupler'):
+            coupled_samples = self.cross_scale_coupler.couple(scale_uniform_samples, seed=seed + 999)
+        else:
+            coupled_samples = scale_uniform_samples
+
+        total_asset_returns = np.zeros((n_sim, self.n_assets), dtype=float)
+
+        for scale_name in self.scale_order:
+            model = self.scale_models[scale_name]
+            marginals = model["marginals"]
+            U_coupled = coupled_samples[scale_name]
 
             scale_components = np.zeros((n_sim, self.n_assets), dtype=float)
 
             for i, m in enumerate(marginals):
-                scale_components[:, i] = m.forecast_component(U[:, i])
+                scale_components[:, i] = m.forecast_component(U_coupled[:, i])
 
             total_asset_returns += scale_components
 
