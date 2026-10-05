@@ -3,36 +3,38 @@ QUANT EDGE 1.0: WAVELET-COPULA RISK FRAMEWORK SUMMARY
 ======================================================================
 
 Backtest settings:
-Training window: 750
-Test days: 60
-Monte Carlo simulations per forecast: 1000
+Training window: 1000
+Test days: 252
+Monte Carlo simulations per forecast: 2000
 Confidence level: 99%
-Wavelet levels: 3
+Wavelet levels: 5
 
 VaR coverage tests:
-Model Kupiec LR: 0.2244, p-value: 0.6357, violation rate: 0.0167
-Benchmark Kupiec LR: 12.7369, p-value: 0.0004, violation rate: 0.0833
+Model Kupiec LR: 1.2007, p-value: 0.2732, violation rate: 0.0040
+Benchmark Kupiec LR: 1.9165, p-value: 0.1662, violation rate: 0.0198
 
 VaR independence tests:
-Model Christoffersen LR: 0.0345, p-value: 0.8527
-Benchmark Christoffersen LR: 0.9273, p-value: 0.3356
+Model Christoffersen LR: 0.0080, p-value: 0.9287
+Benchmark Christoffersen LR: 0.2033, p-value: 0.6521
 
 Expected Shortfall joint loss:
-Mean FZ loss model: -2.966101
-Mean FZ loss benchmark: -7.736977
-Diebold-Mariano stat: 2.1737, p-value: 0.0297
+Mean FZ loss model: -3.357379
+Mean FZ loss benchmark: -4.157623
+Diebold-Mariano stat: 3.9756, p-value: 0.0001
 
 Tail dependence by horizon:
-D1: lower tail = 0.0668, upper tail = 0.0641
-D2: lower tail = 0.0633, upper tail = 0.0628
-D3: lower tail = 0.0689, upper tail = 0.0691
-S3: lower tail = 0.0657, upper tail = 0.0669
+D1: lower tail = 0.0632, upper tail = 0.0637
+D2: lower tail = 0.0671, upper tail = 0.0645
+D3: lower tail = 0.0723, upper tail = 0.0710
+D4: lower tail = 0.0624, upper tail = 0.0601
+D5: lower tail = 0.0609, upper tail = 0.0600
+S5: lower tail = 0.0871, upper tail = 0.0906
 
 Economic interpretation:
-Average model 99% ES: -0.0714
-Average benchmark 99% ES: -0.0269
-Benchmark ES underestimation relative to model: 165.47%
-Lower tail dependence ratio longest/shortest scale: 0.98x
+Average model 99% ES: -0.0437
+Average benchmark 99% ES: -0.0275
+Benchmark ES underestimation relative to model: 58.91%
+Lower tail dependence ratio longest/shortest scale: 1.38x
 
 ======================================================================
 CONCRETE RECOMMENDATION FOR RISK MANAGERS
@@ -54,10 +56,10 @@ Actionable rule:
 2. Size strategic tail hedges, drawdown controls, and capital buffers using
    the low-frequency Expected Shortfall estimate.
 
-3. If the low-frequency ES is 0.0714 while the aggregate
-   Gaussian benchmark ES is only 0.0269, then relying on
+3. If the low-frequency ES is 0.0437 while the aggregate
+   Gaussian benchmark ES is only 0.0275, then relying on
    the aggregate benchmark may understate tail risk by approximately
-   165.5%.
+   58.9%.
 
 4. Review hedge ratios whenever the long-scale lower tail dependence rises
    materially above the short-scale estimate.

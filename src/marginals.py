@@ -259,7 +259,10 @@ class MarginalARQGARCH:
         upper_mask = z >= self.upper_thr
         interior_mask = ~(lower_mask | upper_mask)
 
-        # Lower tail.
+        # Lower tail (survival-probability formulation).
+        # As z decreases below the threshold, excess grows and G(excess)->1,
+        # so (1 - G(excess))->0, giving u->0 for extreme losses.
+        # At the threshold itself, excess=0, G(0)=0, so u = p_lower.
         if np.any(lower_mask):
             excess = self.lower_thr - z[lower_mask]
             excess = np.maximum(excess, 0.0)
@@ -267,7 +270,7 @@ class MarginalARQGARCH:
             cond = genpareto.cdf(excess, self.xi_l, loc=0.0, scale=self.beta_l)
             cond = np.clip(cond, 0.0, 1.0)
 
-            u[lower_mask] = self.p_lower * cond
+            u[lower_mask] = self.p_lower * (1.0 - cond)
 
         # Upper tail.
         if np.any(upper_mask):
@@ -308,9 +311,11 @@ class MarginalARQGARCH:
         upper_mask = u >= self.p_upper
         interior_mask = ~(lower_mask | upper_mask)
 
-        # Lower tail.
+        # Lower tail (inverse of survival-probability formulation).
+        # Forward: u = p_lower * (1 - G(excess))  =>  G(excess) = 1 - u/p_lower
+        # So we invert G at (1 - u/p_lower) to recover excess.
         if np.any(lower_mask):
-            cond = u[lower_mask] / self.p_lower
+            cond = 1.0 - u[lower_mask] / self.p_lower
             cond = np.clip(cond, 1e-8, 1.0 - 1e-8)
 
             excess = genpareto.ppf(cond, self.xi_l, loc=0.0, scale=self.beta_l)
