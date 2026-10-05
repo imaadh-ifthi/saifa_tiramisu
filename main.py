@@ -133,6 +133,9 @@ def main():
     else:
         cfg.WEIGHTS = np.asarray(cfg.WEIGHTS, dtype=float)
         cfg.WEIGHTS = cfg.WEIGHTS / cfg.WEIGHTS.sum()
+        
+    from src.tail_dependence import run_validation
+    run_validation(returns, cfg)
 
     results, tail_df = run_backtest(returns, cfg)
 

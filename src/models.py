@@ -76,6 +76,7 @@ class MultiScaleWaveletVine:
         self.scale_models = {}
         self.tail_deps = {}
         self.scale_order = []
+        self.empirical_U = {}
         stress_matrix_cols = []
 
         for j in range(self.levels):
@@ -86,6 +87,7 @@ class MultiScaleWaveletVine:
             )
 
             U = self._fit_scale(scale_name, X)
+            self.empirical_U[scale_name] = U
             U_clipped = np.clip(U, 1e-6, 1.0 - 1e-6)
             stress_matrix_cols.append(np.mean(norm.ppf(U_clipped), axis=1))
             self.scale_order.append(scale_name)
@@ -95,6 +97,7 @@ class MultiScaleWaveletVine:
         X_smooth = np.column_stack(smooth_by_asset)
 
         U = self._fit_scale(scale_name, X_smooth)
+        self.empirical_U[scale_name] = U
         U_clipped = np.clip(U, 1e-6, 1.0 - 1e-6)
         stress_matrix_cols.append(np.mean(norm.ppf(U_clipped), axis=1))
         self.scale_order.append(scale_name)
