@@ -1,0 +1,30 @@
+{
+  "data_source": "Yahoo Finance (via yfinance)",
+  "data_sha256": "60fe5c30013ee5fc7a3d6f42e5a05ed7718a359dbd9cc8924e57e5f2599faafe",
+  "assets": [
+    "SPY",
+    "IEF",
+    "GLD",
+    "USO",
+    "BTC-USD"
+  ],
+  "data_start": "2015-01-05",
+  "data_end": "2025-12-30",
+  "observations": 2764,
+  "levels": 5,
+  "wavelet": "db4",
+  "train_window": 1000,
+  "test_days": null,
+  "refit_every": 21,
+  "n_sim": 2000,
+  "alpha": 0.01,
+  "seed": 42,
+  "tail_quantile": 0.95,
+  "weights": [
+    0.2,
+    0.2,
+    0.2,
+    0.2,
+    0.2
+  ]
+}

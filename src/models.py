@@ -106,7 +106,10 @@ class MultiScaleWaveletVine:
 
         # Fit cross-scale model
         if self.use_cross_scale:
-            stress_matrix = np.column_stack(stress_matrix_cols)
+            # Detail levels can produce slightly different row counts; truncate
+            # all stress vectors to the common minimum length before stacking.
+            min_rows = min(col.shape[0] for col in stress_matrix_cols)
+            stress_matrix = np.column_stack([col[-min_rows:] for col in stress_matrix_cols])
             self.cross_scale_coupler = CrossScaleCopulaCoupler(scale_names=self.scale_order)
             self.cross_scale_coupler.fit(stress_matrix)
 
@@ -134,7 +137,10 @@ class MultiScaleWaveletVine:
             marginals.append(m)
             U_list.append(u)
 
-        U = np.column_stack(U_list)
+        # GARCH burn-in may differ by one observation across assets; align to
+        # the shortest PIT series before stacking to avoid shape mismatches.
+        min_len = min(len(u) for u in U_list)
+        U = np.column_stack([u[-min_len:] for u in U_list])
 
         cop = VineCopulaModel()
         cop.fit(U)
@@ -314,8 +320,11 @@ class HeavyTailMarginalModel:
             u = m.in_sample_pit()
             self.marginals.append(m)
             U_list.append(u)
-            
-        U = np.column_stack(U_list)
+
+        # GARCH burn-in may differ by one observation across assets; truncate
+        # all PIT arrays to the same minimum length before stacking.
+        min_len = min(len(u) for u in U_list)
+        U = np.column_stack([u[-min_len:] for u in U_list])
         self.copula = VineCopulaModel()
         self.copula.fit(U)
         return self

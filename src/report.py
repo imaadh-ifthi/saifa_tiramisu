@@ -142,7 +142,9 @@ def save_report(results: pd.DataFrame, tail_df: pd.DataFrame, cfg):
     df_summary.to_csv(results_dir / "model_comparison.csv", index=False)
     df_summary.to_csv(results_dir / "final_validation_summary.csv", index=False)
 
-    horizon = _load_horizon_summary(results_dir)
+    # Load the horizon-level tail-dependence bootstrap summary produced by Fix 4.
+    # Reads "tail_dependence_horizon_summary.csv"; not any legacy file.
+    horizon = _load_horizon_summary(results_dir)  # reads tail_dependence_horizon_summary.csv
     horizon_text = _horizon_conclusion(horizon)
     recommendation, selection_rule = _select_recommendation(df_summary, horizon_text)
 

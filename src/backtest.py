@@ -68,7 +68,8 @@ def run_backtest(returns: pd.DataFrame, cfg):
         need_refit = (models_state["M3"] is None) or ((t - start) % cfg.REFIT_EVERY == 0)
 
         if need_refit:
-            print(f"[Backtest] Fitting models on window ending {date.date()}")
+            date_str = date.date() if hasattr(date, "date") else date
+            print(f"[Backtest] Fitting models on window ending {date_str}")
             
             # M0: Historical Simulation
             m0 = HistoricalSimulationBenchmark()
