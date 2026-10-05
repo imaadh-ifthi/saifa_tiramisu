@@ -1,88 +1,30 @@
 """
 Multiresolution decomposition module.
 
-This implements a practical wavelet-style additive multiresolution decomposition
-using Daubechies low-pass filters with reflection boundary handling.
-
-The key properties required for the challenge are:
-
-1. Decomposition into multiple investment horizons.
-2. Exact additive reconstruction:
-       X = D1 + D2 + ... + DJ + SJ
-3. Reflection boundary treatment to reduce future information leakage
-   at the right boundary during rolling out-of-sample forecasting.
+This implements a MODWT-equivalent normalized undecimated wavelet decomposition
+using PyWavelets' Stationary Wavelet Transform (SWT). It builds additive
+multiresolution analysis (MRA) components without decimation.
+Arbitrary lengths are supported via symmetric padding. A generous padding margin
+is used to completely prevent out-of-sample (OOS) leakage and preserve strict
+causality within the rolling window.
 """
 
 from typing import List, Tuple
-
 import numpy as np
 import pywt
 
 
-class AdditiveMODWT:
+class MODWTDecomposer:
     """
-    Additive multiresolution decomposition inspired by MODWT.
+    MODWT-equivalent normalized undecimated wavelet decomposition.
 
-    This is not the non-redundant DWT. It keeps all series at the original
-    length and gives an exact additive reconstruction.
+    This builds additive MRA components using the undecimated SWT.
+    It preserves the full original time-series length at every scale.
     """
 
     def __init__(self, wavelet: str = "db4", levels: int = 5):
         self.wavelet_name = wavelet
         self.levels = int(levels)
-
-        wave = pywt.Wavelet(wavelet)
-
-        # Low-pass scaling filter.
-        lo = np.asarray(wave.dec_lo, dtype=float)
-
-        # Normalize so that the filter sums to one.
-        # PyWavelets' dec_lo usually sums to sqrt(2).
-        lo = lo / np.sqrt(2.0)
-        lo = lo / np.sum(lo)
-
-        self.base_filter = lo
-
-    def _pad_reflect(self, x: np.ndarray, left: int, right: int) -> np.ndarray:
-        """
-        Reflect padding with edge fallback if reflection width is too large.
-        """
-        if left == 0 and right == 0:
-            return x
-
-        try:
-            return np.pad(x, (left, right), mode="reflect")
-        except ValueError:
-            return np.pad(x, (left, right), mode="edge")
-
-    def _upsample_filter(self, stride: int) -> np.ndarray:
-        """
-        Upsample the base filter for à-trous style decomposition.
-        """
-        base = self.base_filter
-        up = np.zeros(len(base) * stride, dtype=float)
-        up[::stride] = base
-        up = up / np.sum(up)
-        return up
-
-    def _smooth(self, x: np.ndarray, filter_: np.ndarray) -> np.ndarray:
-        """
-        Apply centered low-pass filter with reflection boundary handling.
-        """
-        x = np.asarray(x, dtype=float)
-        L = len(filter_)
-
-        left_pad = (L - 1) // 2
-        right_pad = (L - 1) - left_pad
-
-        padded = self._pad_reflect(x, left_pad, right_pad)
-
-        smooth = np.convolve(padded, filter_, mode="valid")
-
-        # Ensure exact length.
-        smooth = smooth[: len(x)]
-
-        return smooth
 
     def decompose(self, x: np.ndarray) -> Tuple[List[np.ndarray], np.ndarray]:
         """
@@ -101,29 +43,60 @@ class AdditiveMODWT:
             Smooth component SJ.
         """
         x = np.asarray(x, dtype=float)
+        L = len(x)
 
-        S = x.copy()
+        if L == 0:
+            return [np.array([]) for _ in range(self.levels)], np.array([])
+        
+        # Use a generous margin to prevent PyWavelets' periodic boundary handling
+        # from wrapping the right edge back to the left edge.
+        # For db4 at level 5, max filter reach is 218, so 250 is extremely safe.
+        margin = 250
+        
+        total_len = L + 2 * margin
+        modulo = total_len % (2 ** self.levels)
+        
+        if modulo != 0:
+            pad_right = margin + (2 ** self.levels) - modulo
+        else:
+            pad_right = margin
+            
+        pad_left = margin
+        
+        # Symmetric padding minimizes statistical artefacts at the edges
+        x_pad = np.pad(x, (pad_left, pad_right), mode='symmetric')
+            
+        coefs = pywt.swt(x_pad, self.wavelet_name, level=self.levels, norm=True, trim_approx=True)
+        # coefs is structured as [cA_J, cD_J, cD_{J-1}, ..., cD_1]
+        
+        zeros = [np.zeros_like(c) for c in coefs]
+        
         details = []
-
+        # Extract additive detail components D1 to DJ
         for j in range(1, self.levels + 1):
-            stride = 2 ** (j - 1)
-            filter_j = self._upsample_filter(stride)
-
-            S_next = self._smooth(S, filter_j)
-            D_j = S - S_next
-
+            idx = self.levels - j + 1
+            c_temp = list(zeros)
+            c_temp[idx] = coefs[idx]
+            D_j_pad = pywt.iswt(c_temp, self.wavelet_name, norm=True)
+            D_j = D_j_pad[pad_left : pad_left + L]
             details.append(D_j)
-            S = S_next
-
-        return details, S
+            
+        # Extract additive smooth component SJ
+        c_temp = list(zeros)
+        c_temp[0] = coefs[0]
+        S_J_pad = pywt.iswt(c_temp, self.wavelet_name, norm=True)
+        S_J = S_J_pad[pad_left : pad_left + L]
+            
+        return details, S_J
 
     def reconstruct(self, details: List[np.ndarray], smooth: np.ndarray) -> np.ndarray:
         """
         Exact additive reconstruction.
         """
         out = smooth.copy()
-
         for D in details:
             out = out + D
-
         return out
+
+# Maintain backward compatibility for existing downstream imports
+AdditiveMODWT = MODWTDecomposer
