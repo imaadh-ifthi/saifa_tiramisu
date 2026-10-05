@@ -8,6 +8,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from src.models import MultiScaleWaveletVine
+from src.modwt import AdditiveMODWT
 from config import RESULTS_DIR
 
 def empirical_tail_dependence(u1, u2, q):
@@ -40,6 +41,115 @@ def bootstrap_tail_dependence(u1, u2, q, n_boot=2000, seed=42):
         
     return boot_L, boot_U
 
+
+
+def aggregate_tail_dependence(U: np.ndarray, q: float, n_boot: int = 2000, seed: int = 42):
+    """
+    Mean pairwise empirical tail dependence with an observation-level bootstrap CI.
+
+    The same bootstrap time indices are applied to every asset pair so the CI is for
+    the mean of the ten pairwise coefficients, rather than an arithmetic average of
+    pair-level confidence-interval endpoints.
+    """
+    U = np.asarray(U, dtype=float)
+    n, n_assets = U.shape
+    if n < 2:
+        return {
+            "estimate": np.nan, "ci_low": np.nan, "ci_high": np.nan,
+            "bootstrap": np.array([], dtype=float),
+        }
+
+    pairs = list(combinations(range(n_assets), 2))
+
+    def mean_stat(indices=None):
+        X = U if indices is None else U[indices]
+        vals = [
+            empirical_tail_dependence(X[:, i], X[:, j], q)[0]
+            for i, j in pairs
+        ]
+        return float(np.mean(vals))
+
+    estimate = mean_stat()
+    rng = np.random.default_rng(seed)
+    bootstrap = np.empty(int(n_boot), dtype=float)
+    for b in range(int(n_boot)):
+        idx = rng.integers(0, n, size=n)
+        bootstrap[b] = mean_stat(idx)
+
+    ci = np.percentile(bootstrap, [2.5, 97.5])
+    return {
+        "estimate": estimate,
+        "ci_low": float(ci[0]),
+        "ci_high": float(ci[1]),
+        "bootstrap": bootstrap,
+    }
+
+
+def aggregate_scale_difference(U_base: np.ndarray, U_compare: np.ndarray, q: float, n_boot: int = 2000, seed: int = 42):
+    """
+    Paired observation-level bootstrap for the difference in mean pairwise tail dependence.
+    """
+    U_base = np.asarray(U_base, dtype=float)
+    U_compare = np.asarray(U_compare, dtype=float)
+    if U_base.shape != U_compare.shape:
+        raise ValueError("Base and comparison PIT matrices must have identical shape and time alignment.")
+
+    n, n_assets = U_base.shape
+    pairs = list(combinations(range(n_assets), 2))
+
+    def stat(indices):
+        Xb = U_base[indices]
+        Xc = U_compare[indices]
+        vals_b = [empirical_tail_dependence(Xb[:, i], Xb[:, j], q)[0] for i, j in pairs]
+        vals_c = [empirical_tail_dependence(Xc[:, i], Xc[:, j], q)[0] for i, j in pairs]
+        return float(np.mean(vals_c) - np.mean(vals_b))
+
+    point = stat(np.arange(n))
+    rng = np.random.default_rng(seed)
+    boot = np.empty(int(n_boot), dtype=float)
+    for b in range(int(n_boot)):
+        boot[b] = stat(rng.integers(0, n, size=n))
+
+    ci = np.percentile(boot, [2.5, 97.5])
+    return {
+        "estimate": point,
+        "ci_low": float(ci[0]),
+        "ci_high": float(ci[1]),
+        "bootstrap": boot,
+        "p_value": float(min(1.0, 2.0 * min(np.mean(boot <= 0.0), np.mean(boot >= 0.0)))),
+    }
+
+
+
+
+def benjamini_hochberg(p_values, alpha=0.05):
+    """Return BH-FDR rejection flags and adjusted p-values without extra dependencies."""
+    p = np.asarray(p_values, dtype=float)
+    m = len(p)
+    if m == 0:
+        return np.array([], dtype=bool), np.array([], dtype=float)
+
+    order = np.argsort(p)
+    sorted_p = p[order]
+    adjusted = np.empty(m, dtype=float)
+    running = 1.0
+    for k in range(m - 1, -1, -1):
+        rank = k + 1
+        running = min(running, sorted_p[k] * m / rank)
+        adjusted[k] = running
+
+    p_adj = np.empty(m, dtype=float)
+    p_adj[order] = np.clip(adjusted, 0.0, 1.0)
+    critical = alpha * np.arange(1, m + 1) / m
+    reject_sorted = sorted_p <= critical
+    if np.any(reject_sorted):
+        max_k = np.max(np.where(reject_sorted)[0])
+        reject_sorted = np.arange(m) <= max_k
+    reject = np.empty(m, dtype=bool)
+    reject[order] = reject_sorted
+    return reject, p_adj
+
+
 def run_validation(returns, cfg):
     """
     Run full statistical tail dependence validation.
@@ -50,29 +160,20 @@ def run_validation(returns, cfg):
     
     asset_names = list(returns.columns)
     
-    # 1. Define periods
+    # Primary analysis uses a fixed broad historical sample.
     broad_train = returns.loc["2015-01-01":"2019-12-31"]
-    stress_train = returns.loc["2020-02-01":"2020-06-30"]
-    
-    periods = {
-        "broad": broad_train,
-        "stress": stress_train
-    }
-    
-    models = {}
-    for p_name, p_data in periods.items():
-        if len(p_data) < 100:
-            print(f"[Validation] Warning: period {p_name} is too short ({len(p_data)} obs). Skipping.")
-            continue
-        print(f"[Validation] Fitting MultiScaleWaveletVine for {p_name} period...")
-        m = MultiScaleWaveletVine(levels=cfg.LEVELS, wavelet=cfg.WAVELET, seed=cfg.SEED, tail_quantile=cfg.TAIL_QUANTILE)
-        m.fit(p_data)
-        models[p_name] = m
-
-    # Extract broad model for primary results
-    if "broad" not in models:
+    if len(broad_train) < 100:
+        print(f"[Validation] Warning: broad sample is too short ({len(broad_train)} obs). Skipping.")
         return
-    broad_m = models["broad"]
+
+    print("[Validation] Fitting MultiScaleWaveletVine for broad historical sample...")
+    broad_m = MultiScaleWaveletVine(
+        levels=cfg.LEVELS,
+        wavelet=cfg.WAVELET,
+        seed=cfg.SEED,
+        tail_quantile=cfg.TAIL_QUANTILE,
+    )
+    broad_m.fit(broad_train)
     
     thresholds = [0.025, 0.05, 0.10]
     n_boot = 2000
@@ -171,35 +272,118 @@ def run_validation(returns, cfg):
                     "delta_est": delta,
                     "delta_ci_low": ci_delta[0],
                     "delta_ci_high": ci_delta[1],
-                    "excludes_zero": sig
+                    "excludes_zero": sig,
+                    "bootstrap_p_value": float(min(1.0, 2.0 * min(np.mean(boot_deltas <= 0.0), np.mean(boot_deltas >= 0.0))))
                 })
                 
     df_comp = pd.DataFrame(comp_results)
+    if not df_comp.empty:
+        # Benjamini-Hochberg FDR correction over the exploratory scale/pair
+        # bootstrap p-values at each threshold. This does not change estimates.
+        for q in thresholds:
+            mask = df_comp["threshold_q"] == q
+            pvals = df_comp.loc[mask, "bootstrap_p_value"].to_numpy(dtype=float)
+            if len(pvals):
+                reject, p_adj = benjamini_hochberg(pvals, alpha=0.05)
+                df_comp.loc[mask, "fdr_rejected_05"] = reject
+                df_comp.loc[mask, "fdr_p_value"] = p_adj
     df_comp.to_csv(out_dir / "tail_dependence_scale_comparison.csv", index=False)
+
+    # Aggregate horizon summary. This is the canonical source for the final report:
+    # mean pairwise tail-dependence estimates with a genuine observation-level
+    # bootstrap CI, plus a paired D1-vs-scale bootstrap difference.
+    horizon_rows = []
+    for scale in broad_m.scale_order:
+        stats = aggregate_tail_dependence(broad_m.empirical_U[scale], q=0.05, n_boot=n_boot, seed=cfg.SEED)
+        horizon_rows.append({
+            "scale": scale,
+            "threshold_q": 0.05,
+            "mean_pair_lambda_L": stats["estimate"],
+            "ci_low": stats["ci_low"],
+            "ci_high": stats["ci_high"],
+            "independence_reference": 0.05,
+        })
+
+    d1_U = broad_m.empirical_U["D1"]
+    for row in horizon_rows:
+        scale = row["scale"]
+        if scale == "D1":
+            row["delta_vs_D1"] = 0.0
+            row["delta_ci_low"] = 0.0
+            row["delta_ci_high"] = 0.0
+            row["delta_bootstrap_p_value"] = np.nan
+            row["delta_fdr_rejected_05"] = False
+        else:
+            diff = aggregate_scale_difference(d1_U, broad_m.empirical_U[scale], q=0.05, n_boot=n_boot, seed=cfg.SEED)
+            row["delta_vs_D1"] = diff["estimate"]
+            row["delta_ci_low"] = diff["ci_low"]
+            row["delta_ci_high"] = diff["ci_high"]
+            row["delta_bootstrap_p_value"] = diff["p_value"]
+            row["delta_fdr_rejected_05"] = False
+
+    df_horizon = pd.DataFrame(horizon_rows)
+    valid_delta = df_horizon["delta_bootstrap_p_value"].notna()
+    if valid_delta.any():
+        reject, p_adj = benjamini_hochberg(
+            df_horizon.loc[valid_delta, "delta_bootstrap_p_value"].to_numpy(dtype=float),
+            alpha=0.05,
+        )
+        df_horizon.loc[valid_delta, "delta_fdr_rejected_05"] = reject
+        df_horizon.loc[valid_delta, "delta_fdr_p_value"] = p_adj
+    df_horizon.to_csv(out_dir / "tail_dependence_horizon_summary.csv", index=False)
 
     # ---------------------------------------------------------
     # Stress Period Comparison
     # ---------------------------------------------------------
-    print("[Validation] Computing stress period comparisons...")
+    print("[Validation] Computing descriptive stress-period comparisons...")
     stress_results = []
-    if "stress" in models:
-        stress_m = models["stress"]
+    stress_start = pd.Timestamp("2020-02-01")
+    stress_end = pd.Timestamp("2020-06-30")
+
+    # Use the SAME broad-sample marginal fits for stress observations rather than
+    # refitting a separate stress model.  The stress analysis is retrospective and
+    # descriptive: it is not used in the rolling OOS forecasts.
+    stress_full = returns.loc[:stress_end].copy()
+    if not stress_full.empty and stress_full.index.min() <= stress_start:
+        decomp = AdditiveMODWT(wavelet=cfg.WAVELET, levels=cfg.LEVELS)
+        stress_components = {scale: [] for scale in broad_m.scale_order}
+        for col in asset_names:
+            details, smooth = decomp.decompose(stress_full[col].to_numpy(dtype=float))
+            for j in range(cfg.LEVELS):
+                stress_components[f"D{j + 1}"].append(details[j])
+            stress_components[f"S{cfg.LEVELS}"].append(smooth)
+
+        full_index = stress_full.index
+        filter_mask = full_index >= pd.Timestamp("2020-01-01")
+        stress_mask = (full_index >= stress_start) & (full_index <= stress_end)
+
+        stress_U_by_scale = {}
+        for scale in broad_m.scale_order:
+            cols = []
+            for i in range(len(asset_names)):
+                component_all = np.asarray(stress_components[scale][i], dtype=float)[filter_mask]
+                marginal = broad_m.scale_models[scale]["marginals"][i]
+                # Carry the fitted volatility state through January before selecting
+                # the February-June stress observations.
+                z_after_training = marginal.standardize_new(component_all)
+                u_after_training = marginal.transform(z_after_training)
+                aligned_index = full_index[filter_mask]
+                select_stress = (aligned_index >= stress_start) & (aligned_index <= stress_end)
+                cols.append(u_after_training[select_stress])
+            stress_U_by_scale[scale] = np.column_stack(cols)
+
         for scale in broad_m.scale_order:
             U_broad = broad_m.empirical_U[scale]
-            U_stress = stress_m.empirical_U[scale]
-            
+            U_stress = stress_U_by_scale[scale]
             for idx_i, idx_j in combinations(range(len(asset_names)), 2):
                 pair_name = f"{asset_names[idx_i]}-{asset_names[idx_j]}"
-                
-                u1_b = U_broad[:, idx_i]
-                u2_b = U_broad[:, idx_j]
-                u1_s = U_stress[:, idx_i]
-                u2_s = U_stress[:, idx_j]
-                
-                for q in [0.05, 0.10]: # Don't do 0.025 for stress due to small N
-                    lam_L_b, _, nb, ev_Lb, _ = empirical_tail_dependence(u1_b, u2_b, q)
-                    lam_L_s, _, ns, ev_Ls, _ = empirical_tail_dependence(u1_s, u2_s, q)
-                    
+                for q in [0.05, 0.10]:
+                    lam_L_b, _, nb, _, _ = empirical_tail_dependence(
+                        U_broad[:, idx_i], U_broad[:, idx_j], q
+                    )
+                    lam_L_s, _, ns, ev_Ls, _ = empirical_tail_dependence(
+                        U_stress[:, idx_i], U_stress[:, idx_j], q
+                    )
                     stress_results.append({
                         "scale": scale,
                         "pair": pair_name,
@@ -208,13 +392,14 @@ def run_validation(returns, cfg):
                         "lambda_L_stress": lam_L_s,
                         "N_broad": nb,
                         "N_stress": ns,
-                        "events_stress": ev_Ls
+                        "events_stress": ev_Ls,
+                        "comparison_type": "descriptive; same pre-stress fitted marginal models"
                     })
-    
+
     df_stress = pd.DataFrame(stress_results)
     if not df_stress.empty:
         df_stress.to_csv(out_dir / "tail_dependence_stress.csv", index=False)
-        
+
     # ---------------------------------------------------------
     # Figures
     # ---------------------------------------------------------
@@ -289,8 +474,8 @@ def run_validation(returns, cfg):
         fig, ax = plt.subplots(figsize=(8, 5))
         w = 0.35
         x = np.arange(len(scale_order))
-        ax.bar(x - w/2, avg_stress["lambda_L_broad"], width=w, label="Broad Sample (2015-2019)", color="skyblue")
-        ax.bar(x + w/2, avg_stress["lambda_L_stress"], width=w, label="Stress Period (H1 2020)", color="salmon")
+        ax.bar(x - w/2, avg_stress["lambda_L_broad"], width=w, label="Broad Sample (2015-2019)")
+        ax.bar(x + w/2, avg_stress["lambda_L_stress"], width=w, label="Stress Period (H1 2020)")
         ax.axhline(0.10, color="black", linestyle="--", label="Independence Reference")
         
         ax.set_xticks(x)

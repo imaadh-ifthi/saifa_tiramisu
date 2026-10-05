@@ -1,6 +1,4 @@
-"""
-Reporting module for Quant Edge 1.0 Ablation Framework.
-"""
+"""Reporting and evidence synthesis for Quant Edge 1.0."""
 
 from pathlib import Path
 import numpy as np
@@ -9,63 +7,98 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from config import RESULTS_DIR
-from src.backtests import (
-    kupiec_test,
-    christoffersen_test,
-    fissler_ziegel_loss,
-    diebold_mariano_test,
-)
+from src.backtests import kupiec_test, christoffersen_test, fissler_ziegel_loss
 
 
-def _scale_sort_key(scale_name: str):
-    if scale_name.startswith("D"):
-        try:
-            return (0, int(scale_name[1:]))
-        except Exception:
-            return (0, 999)
-    return (1, 0)
+def _load_horizon_summary(results_dir: Path) -> pd.DataFrame:
+    path = results_dir / "tail_dependence_horizon_summary.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
+
+def _horizon_conclusion(horizon: pd.DataFrame, base: str = "D1", compare: str = "D5") -> str:
+    if horizon.empty:
+        return "Insufficient evidence: no horizon summary was generated."
+    rows = horizon[horizon["scale"].isin([base, compare])]
+    if len(rows) < 2:
+        return "Insufficient evidence: D1/D5 comparison is unavailable."
+    d5 = rows.loc[rows["scale"] == compare].iloc[0]
+    lo = float(d5["delta_ci_low"])
+    hi = float(d5["delta_ci_high"])
+    delta = float(d5["delta_vs_D1"])
+    if lo > 0:
+        return f"Evidence supports higher lower-tail dependence at {compare} than D1 (delta={delta:.4f}, 95% CI [{lo:.4f}, {hi:.4f}])."
+    if hi < 0:
+        return f"Evidence supports lower lower-tail dependence at {compare} than D1 (delta={delta:.4f}, 95% CI [{lo:.4f}, {hi:.4f}])."
+    return f"No strong evidence of a D1-to-{compare} difference (delta={delta:.4f}, 95% CI [{lo:.4f}, {hi:.4f}] includes zero)."
+
+
+def _select_recommendation(df_summary: pd.DataFrame, horizon_text: str) -> tuple[str, str]:
+    """Select a model using a predeclared, evidence-first rule."""
+    # Prefer models with no evidence of unconditional coverage failure and no evidence
+    # of clustered breaches; use the FZ score as the secondary criterion (lower is better).
+    candidates = df_summary[
+        (df_summary["coverage_test_pvalue"] >= 0.05)
+        & (df_summary["independence_test_pvalue"] >= 0.05)
+    ].copy()
+
+    rule = "Eligible models require coverage and independence p-values >= 0.05; among eligible models, lower Fissler-Ziegel score is preferred."
+    if candidates.empty:
+        candidates = df_summary[df_summary["coverage_test_pvalue"] >= 0.05].copy()
+        rule += " No model passed both tests, so the selection used coverage p-value first, then Fissler-Ziegel score."
+
+    if candidates.empty:
+        selected = df_summary.iloc[np.argmin(np.abs(df_summary["breach_rate"] - (1 - df_summary["vaR_level"].iloc[0])))]
+        rule += " No model passed coverage; selected the model with breach rate closest to the nominal target as a fallback."
+    else:
+        selected = candidates.sort_values(["es_score", "coverage_test_pvalue"], ascending=[True, False]).iloc[0]
+
+    model = str(selected["model"])
+    label = str(selected["model_name"])
+    rec = (
+        f"Recommendation: use {model} ({label}) as the primary 99% VaR/ES risk model under the tested portfolio and OOS setting. "
+        f"The observed evidence indicates: {horizon_text} "
+        "Use the multiscale model as an analytical diagnostic for horizon dependence rather than as the production risk forecast unless future validation shows materially better calibration."
+    )
+    return rec, rule
 
 
 def save_report(results: pd.DataFrame, tail_df: pd.DataFrame, cfg):
-    """
-    Save all report artifacts.
-    """
-    RESULTS_DIR_PATH = Path(cfg.RESULTS_DIR)
-    RESULTS_DIR_PATH.mkdir(parents=True, exist_ok=True)
+    """Generate reproducible validation tables, figures and evidence-based recommendation."""
+    results_dir = Path(cfg.RESULTS_DIR)
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     results = results.copy()
-    
     models = ["M0", "M1", "M2", "M3"]
     model_labels = {
         "M0": "Historical Simulation Benchmark",
         "M1": "Heavy-Tail Marginals",
         "M2": "Wavelet + Within-Scale",
-        "M3": "Full Cross-Scale Multiscale"
+        "M3": "Full Cross-Scale Multiscale",
     }
 
-    # Clean forecasts.
+    required = [f"{m}_{suffix}" for m in models for suffix in ("var", "es")]
+    missing = [c for c in required if c not in results.columns]
+    if missing:
+        raise ValueError(f"Missing forecast columns: {missing}")
+
     for m in models:
         for col in [f"{m}_var", f"{m}_es"]:
-            results[col] = (
-                results[col]
-                .replace([np.inf, -np.inf], np.nan)
-                .ffill()
-                .bfill()
-                .fillna(0.0)
-            )
+            results[col] = pd.to_numeric(results[col], errors="coerce")
+    results = results.replace([np.inf, -np.inf], np.nan).dropna(subset=["actual_return"])
 
-    actual = results["actual_return"].values
+    actual = results["actual_return"].to_numpy(dtype=float)
+    expected_breaches = len(actual) * cfg.ALPHA
 
-    # 1. Output model_comparison_by_window.csv
+    summary_records = []
     window_records = []
-    for idx, row in results.iterrows():
+    for _, row in results.iterrows():
         for m in models:
-            var_val = row[f"{m}_var"]
-            es_val = row[f"{m}_es"]
-            ret = row["actual_return"]
-            breach = 1 if ret < var_val else 0
-            
+            var_val = float(row[f"{m}_var"])
+            es_val = float(row[f"{m}_es"])
+            ret = float(row["actual_return"])
+            breach = int(ret < var_val)
             window_records.append({
                 "forecast_date": row["date"],
                 "training_window_end": row["train_end"],
@@ -74,197 +107,188 @@ def save_report(results: pd.DataFrame, tail_df: pd.DataFrame, cfg):
                 "VaR": var_val,
                 "ES": es_val,
                 "realized_return": ret,
-                "is_breach": breach
+                "is_breach": breach,
             })
-    
-    pd.DataFrame(window_records).to_csv(RESULTS_DIR_PATH / "model_comparison_by_window.csv", index=False)
 
-    # 2. Output model_comparison.csv
-    summary_records = []
-    
-    expected_breaches = len(actual) * cfg.ALPHA
-    
+    df_window = pd.DataFrame(window_records)
+    df_window.to_csv(results_dir / "model_comparison_by_window.csv", index=False)
+
     for m in models:
-        m_var = results[f"{m}_var"].values
-        m_es = results[f"{m}_es"].values
-        
-        breaches = actual < m_var
-        obs_breaches = np.sum(breaches)
-        breach_rate = obs_breaches / len(actual)
-        
-        avg_var = np.mean(m_var)
-        avg_es = np.mean(m_es)
-        avg_realized_loss = np.mean(actual[breaches]) if obs_breaches > 0 else np.nan
-        
-        kt = kupiec_test(actual, m_var, cfg.ALPHA)
-        ct = christoffersen_test(actual, m_var, cfg.ALPHA)
-        fz = fissler_ziegel_loss(actual, m_var, m_es, cfg.ALPHA)
-        avg_fz = np.mean(np.nan_to_num(fz, nan=1e6, posinf=1e6, neginf=-1e6))
-        
+        var_forecast = results[f"{m}_var"].to_numpy(dtype=float)
+        es_forecast = results[f"{m}_es"].to_numpy(dtype=float)
+        breaches = actual < var_forecast
+        obs = int(breaches.sum())
+        kt = kupiec_test(actual, var_forecast, cfg.ALPHA)
+        ct = christoffersen_test(actual, var_forecast, cfg.ALPHA)
+        fz = fissler_ziegel_loss(actual, var_forecast, es_forecast, cfg.ALPHA)
         summary_records.append({
             "model": m,
             "model_name": model_labels[m],
             "vaR_level": 1 - cfg.ALPHA,
             "expected_breaches": expected_breaches,
-            "observed_breaches": obs_breaches,
-            "breach_rate": breach_rate,
-            "average_var": avg_var,
-            "average_es": avg_es,
-            "average_realized_breach_loss": avg_realized_loss,
+            "observed_breaches": obs,
+            "breach_rate": obs / len(actual),
+            "average_var": float(np.mean(var_forecast)),
+            "average_es": float(np.mean(es_forecast)),
+            "average_realized_breach_loss": float(np.mean(actual[breaches])) if obs else np.nan,
             "coverage_test_statistic": kt["stat"],
             "coverage_test_pvalue": kt["p_value"],
             "independence_test_statistic": ct["stat"],
             "independence_test_pvalue": ct["p_value"],
-            "es_score": avg_fz
+            "es_score": float(np.mean(np.nan_to_num(fz, nan=1e6, posinf=1e6, neginf=1e6))),
         })
-        
+
     df_summary = pd.DataFrame(summary_records)
-    df_summary.to_csv(RESULTS_DIR_PATH / "final_validation_summary.csv", index=False)
-    
-    # 3. Figures
-    # FIGURE 1: OOS VaR time series for all models
+    df_summary.to_csv(results_dir / "model_comparison.csv", index=False)
+    df_summary.to_csv(results_dir / "final_validation_summary.csv", index=False)
+
+    horizon = _load_horizon_summary(results_dir)
+    horizon_text = _horizon_conclusion(horizon)
+    recommendation, selection_rule = _select_recommendation(df_summary, horizon_text)
+
+    # Primary competition table uses the genuine aggregate bootstrap output, not a
+    # nonexistent/recovered legacy file and not interval arithmetic on pair CIs.
+    comp = {
+        "tail_dependence_D1": np.nan,
+        "tail_dependence_D5": np.nan,
+        "tail_dependence_D1_CI_lower": np.nan,
+        "tail_dependence_D1_CI_upper": np.nan,
+        "tail_dependence_D5_CI_lower": np.nan,
+        "tail_dependence_D5_CI_upper": np.nan,
+        "D5_minus_D1": np.nan,
+        "D5_minus_D1_CI_lower": np.nan,
+        "D5_minus_D1_CI_upper": np.nan,
+        "M1_average_VaR": float(df_summary.loc[df_summary.model == "M1", "average_var"].iloc[0]),
+        "M3_average_VaR": float(df_summary.loc[df_summary.model == "M3", "average_var"].iloc[0]),
+        "M1_average_ES": float(df_summary.loc[df_summary.model == "M1", "average_es"].iloc[0]),
+        "M3_average_ES": float(df_summary.loc[df_summary.model == "M3", "average_es"].iloc[0]),
+        "M1_breach_rate": float(df_summary.loc[df_summary.model == "M1", "breach_rate"].iloc[0]),
+        "M3_breach_rate": float(df_summary.loc[df_summary.model == "M3", "breach_rate"].iloc[0]),
+        "M1_ES_score": float(df_summary.loc[df_summary.model == "M1", "es_score"].iloc[0]),
+        "M3_ES_score": float(df_summary.loc[df_summary.model == "M3", "es_score"].iloc[0]),
+        "selected_production_model": str(recommendation.split("use ", 1)[1].split(" (", 1)[0]),
+        "horizon_conclusion": horizon_text,
+    }
+    if not horizon.empty:
+        d1 = horizon[horizon.scale == "D1"]
+        d5 = horizon[horizon.scale == "D5"]
+        if not d1.empty:
+            r = d1.iloc[0]
+            comp.update({
+                "tail_dependence_D1": r["mean_pair_lambda_L"],
+                "tail_dependence_D1_CI_lower": r["ci_low"],
+                "tail_dependence_D1_CI_upper": r["ci_high"],
+            })
+        if not d5.empty:
+            r = d5.iloc[0]
+            comp.update({
+                "tail_dependence_D5": r["mean_pair_lambda_L"],
+                "tail_dependence_D5_CI_lower": r["ci_low"],
+                "tail_dependence_D5_CI_upper": r["ci_high"],
+                "D5_minus_D1": r["delta_vs_D1"],
+                "D5_minus_D1_CI_lower": r["delta_ci_low"],
+                "D5_minus_D1_CI_upper": r["delta_ci_high"],
+            })
+    comp["interpretation_flags"] = (
+        f"Horizon={horizon_text}; "
+        f"RiskModelSelection={comp['selected_production_model']}"
+    )
+    pd.DataFrame([comp]).to_csv(results_dir / "final_competition_comparison.csv", index=False)
+
+    # OOS VaR plot
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(results["date"], actual, color="black", alpha=0.5, label="Realized Portfolio Return")
-    colors = {"M0": "blue", "M1": "green", "M2": "orange", "M3": "red"}
-    styles = {"M0": "--", "M1": "-.", "M2": ":", "M3": "-"}
-    
+    ax.plot(results["date"], actual, label="Realized Portfolio Return", linewidth=1.0)
     for m in models:
-        ax.plot(results["date"], results[f"{m}_var"], color=colors[m], linestyle=styles[m], label=model_labels[m])
-        
+        ax.plot(results["date"], results[f"{m}_var"], linestyle="--", linewidth=1.0, label=f"{m} VaR")
     ax.set_title(f"Out-of-Sample {100*(1-cfg.ALPHA):.0f}% VaR Forecasts")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
     fig.autofmt_xdate()
     fig.tight_layout()
-    fig.savefig(RESULTS_DIR_PATH / "final_oos_var_comparison.png", dpi=200)
+    fig.savefig(results_dir / "final_oos_var_comparison.png", dpi=200)
     plt.close(fig)
-    
-    # FIGURE 2: Average / distribution of OOS VaR by model
+
+    # VaR distribution
     fig, ax = plt.subplots(figsize=(8, 5))
-    var_data = [results[f"{m}_var"].values for m in models]
-    ax.boxplot(var_data, tick_labels=[model_labels[m] for m in models])
+    ax.boxplot([results[f"{m}_var"].to_numpy() for m in models], tick_labels=models)
     ax.set_title("Distribution of OOS VaR Estimates")
     ax.set_ylabel("VaR")
-    plt.xticks(rotation=15, ha='right')
     fig.tight_layout()
-    fig.savefig(RESULTS_DIR_PATH / "var_distribution.png", dpi=200)
+    fig.savefig(results_dir / "var_distribution.png", dpi=200)
     plt.close(fig)
 
-    # FIGURE 3: Average OOS ES by model
+    # ES comparison
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar([model_labels[m] for m in models], df_summary["average_es"].values, color=["blue", "green", "orange", "red"])
+    ax.bar(models, [df_summary.loc[df_summary.model == m, "average_es"].iloc[0] for m in models])
     ax.set_title("Average Expected Shortfall")
     ax.set_ylabel("Expected Shortfall")
-    plt.xticks(rotation=15, ha='right')
     fig.tight_layout()
-    fig.savefig(RESULTS_DIR_PATH / "final_es_comparison.png", dpi=200)
+    fig.savefig(results_dir / "final_es_comparison.png", dpi=200)
     plt.close(fig)
 
-    # FIGURE 4: Observed vs nominal VaR breach rate
+    # Breach calibration
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar([model_labels[m] for m in models], df_summary["breach_rate"].values, color=["blue", "green", "orange", "red"])
-    ax.axhline(cfg.ALPHA, color="black", linestyle="--", label="Nominal Target")
+    ax.bar(models, [df_summary.loc[df_summary.model == m, "breach_rate"].iloc[0] for m in models])
+    ax.axhline(cfg.ALPHA, linestyle="--", label="Nominal Target")
     ax.set_title("Empirical VaR Breach Rate")
     ax.set_ylabel("Breach Rate")
     ax.legend()
-    plt.xticks(rotation=15, ha='right')
     fig.tight_layout()
-    fig.savefig(RESULTS_DIR_PATH / "final_breach_calibration.png", dpi=200)
+    fig.savefig(results_dir / "final_breach_calibration.png", dpi=200)
     plt.close(fig)
-    
-    # Stress Validation
-    stress_mask = (results["date"] >= pd.to_datetime("2020-02-01")) & (results["date"] <= pd.to_datetime("2020-06-30"))
-    stress_results = results[stress_mask]
-    
+
+    # Stress-period view is descriptive only; it does not create a new statistical claim.
+    stress_mask = (pd.to_datetime(results["date"]) >= pd.Timestamp("2020-02-01")) & (pd.to_datetime(results["date"]) <= pd.Timestamp("2020-06-30"))
+    stress_results = results.loc[stress_mask]
     if not stress_results.empty:
         fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(stress_results["date"], stress_results["actual_return"], color="black", label="Realized", linewidth=2)
+        ax.plot(stress_results["date"], stress_results["actual_return"], label="Realized", linewidth=1.5)
         for m in models:
-            ax.plot(stress_results["date"], stress_results[f"{m}_var"], color=colors[m], linestyle=styles[m], label=f"{m} VaR")
-        ax.set_title("Stress Period (H1 2020 COVID-19) Comparison")
+            ax.plot(stress_results["date"], stress_results[f"{m}_var"], linestyle="--", label=f"{m} VaR")
+        ax.set_title("Stress Period (H1 2020) — Descriptive OOS Comparison")
         ax.legend(fontsize=8)
         fig.autofmt_xdate()
         fig.tight_layout()
-        fig.savefig(RESULTS_DIR_PATH / "final_stress_comparison.png", dpi=200)
+        fig.savefig(results_dir / "final_stress_comparison.png", dpi=200)
         plt.close(fig)
 
-    # 4. Write final_validation_summary.txt
-    s = []
-    s.append("=" * 70)
-    s.append("QUANT EDGE 1.0: ABLATION FRAMEWORK SUMMARY")
-    s.append("=" * 70)
-    s.append(f"Training Window: {cfg.TRAIN_WINDOW}")
-    s.append(f"OOS Days: {len(results)}")
-    
-    s.append("\n--- ABLATION DELTAS ---")
-    m0, m1, m2, m3 = df_summary.iloc[0], df_summary.iloc[1], df_summary.iloc[2], df_summary.iloc[3]
-    
-    def format_delta(m_post, m_pre, name):
-        d_var = m_post['average_var'] - m_pre['average_var']
-        d_es = m_post['average_es'] - m_pre['average_es']
-        d_breach = m_post['breach_rate'] - m_pre['breach_rate']
-        return f"{name}:\n  Avg VaR Diff: {d_var:.4f}\n  Avg ES Diff: {d_es:.4f}\n  Breach Rate Diff: {d_breach:.4f}\n"
-
-    s.append(format_delta(m1, m0, "M1 - M0 (Heavy-tail vs Benchmark)"))
-    s.append(format_delta(m2, m1, "M2 - M1 (Wavelets vs Heavy-tail)"))
-    s.append(format_delta(m3, m2, "M3 - M2 (Cross-Scale vs Within-Scale)"))
-    s.append(format_delta(m3, m0, "M3 - M0 (Full Model vs Benchmark)"))
-    
-    s.append("\n--- THE MOST IMPORTANT COMPARISON (IGNORE HORIZON DEPENDENCE VS FULL MODEL) ---")
-    s.append("Model M1 (ignores multiscale/cross-scale) vs Model M3 (current FULL model).")
-    s.append(f"VaR (M1): {m1['average_var']:.4f}  | VaR (M3): {m3['average_var']:.4f}")
-    s.append(f"ES (M1): {m1['average_es']:.4f}  | ES (M3): {m3['average_es']:.4f}")
-    s.append(f"Breaches (M1): {m1['observed_breaches']}  | Breaches (M3): {m3['observed_breaches']}")
-    
-    s.append("\n" + "=" * 70)
-    s.append("CONCRETE RECOMMENDATION FOR RISK MANAGERS")
-    s.append("=" * 70 + "\n")
-    recommendation = f"""
-1. Action: Size strategic tail hedges and drawdown controls using the low-frequency Expected Shortfall estimate (M3), while keeping short-term liquidity limits based on high-frequency benchmarks (M0/M1).
-2. Why: The framework establishes that tail dependence changes across scales, meaning standard daily risk models systematically understate joint diversification failure precisely when stress persists for multiple weeks.
-3. Evidence: M3 properly calibrates the tail without artificially altering normal volatility, delivering superior ES coverage in out-of-sample stress testing while avoiding numerical divergence.
-4. Scope / horizon: Applicable specifically to strategic / capital hedging (horizons \u2265 8 days).
-5. Limitation: Small OOS sample sizes inherently limit the statistical power of the Kupiec/Christoffersen coverage tests at the 99% VaR confidence level.
-"""
-    s.append(recommendation)
-    
+    # Final text must be generated from actual measured outputs, never hard-coded.
+    s = [
+        "=" * 70,
+        "QUANT EDGE 1.0: FINAL VALIDATION SUMMARY",
+        "=" * 70,
+        f"Training Window: {cfg.TRAIN_WINDOW}",
+        f"OOS Days: {len(results)}",
+        f"OOS Start: {pd.to_datetime(results['date']).min().date()}",
+        f"OOS End: {pd.to_datetime(results['date']).max().date()}",
+        "",
+        "--- HORIZON EVIDENCE ---",
+        horizon_text,
+        "",
+        "--- MODEL COMPARISON ---",
+    ]
+    for _, row in df_summary.iterrows():
+        s.append(
+            f"{row['model']}: breach_rate={row['breach_rate']:.4f}, "
+            f"avg_VaR={row['average_var']:.4f}, avg_ES={row['average_es']:.4f}, "
+            f"coverage_p={row['coverage_test_pvalue']:.6g}, "
+            f"independence_p={row['independence_test_pvalue']:.6g}, "
+            f"FZ_score={row['es_score']:.4f}"
+        )
+    s.extend([
+        "",
+        "--- MODEL SELECTION RULE ---",
+        selection_rule,
+        "",
+        "--- RISK-MANAGER RECOMMENDATION ---",
+        recommendation,
+        "",
+        "--- LIMITATIONS ---",
+        "99% VaR backtests have limited statistical power when the OOS sample is short; interpret p-values alongside breach counts and ES scores.",
+        "Stress-period tail-dependence comparisons are descriptive unless a common fitted marginal transformation is used across periods.",
+        "The multiscale model's production suitability depends on the corrected PIT pipeline and the full OOS results generated by this exact run.",
+    ])
     summary_text = "\n".join(s)
-    with open(RESULTS_DIR_PATH / "final_validation_summary.txt", "w", encoding="utf-8") as f:
-        f.write(summary_text)
+    (results_dir / "final_validation_summary.txt").write_text(summary_text, encoding="utf-8")
 
-    # 5. Create final_competition_comparison.csv
-    td = pd.read_csv(RESULTS_DIR_PATH / "tail_dependence_results.csv")
-    d1_broad = td.loc[(td["scale"] == "D1") & (td["threshold_q"] == 0.05), "lambda_L_broad"].mean()
-    d5_broad = td.loc[(td["scale"] == "D5") & (td["threshold_q"] == 0.05), "lambda_L_broad"].mean()
-    d1_lo = td.loc[(td["scale"] == "D1") & (td["threshold_q"] == 0.05), "CI_lower"].mean()
-    d1_hi = td.loc[(td["scale"] == "D1") & (td["threshold_q"] == 0.05), "CI_upper"].mean()
-    d5_lo = td.loc[(td["scale"] == "D5") & (td["threshold_q"] == 0.05), "CI_lower"].mean()
-    d5_hi = td.loc[(td["scale"] == "D5") & (td["threshold_q"] == 0.05), "CI_upper"].mean()
-    d5_minus_d1 = d5_broad - d1_broad
-    # Rough approximation for difference CI
-    diff_lo = d5_lo - d1_hi
-    diff_hi = d5_hi - d1_lo
-
-    comp_row = {
-        "tail_dependence_D1": d1_broad,
-        "tail_dependence_D5": d5_broad,
-        "tail_dependence_D1_CI_lower": d1_lo,
-        "tail_dependence_D1_CI_upper": d1_hi,
-        "tail_dependence_D5_CI_lower": d5_lo,
-        "tail_dependence_D5_CI_upper": d5_hi,
-        "D5_minus_D1": d5_minus_d1,
-        "D5_minus_D1_CI_lower": diff_lo,
-        "D5_minus_D1_CI_upper": diff_hi,
-        "M1_average_VaR": m1['average_var'],
-        "M3_average_VaR": m3['average_var'],
-        "M1_average_ES": m1['average_es'],
-        "M3_average_ES": m3['average_es'],
-        "M1_breach_rate": m1['breach_rate'],
-        "M3_breach_rate": m3['breach_rate'],
-        "M1_ES_score": m1['es_score'],
-        "M3_ES_score": m3['es_score'],
-        "interpretation_flags": "A:Yes B:Yes C:Yes D:Yes"
-    }
-    pd.DataFrame([comp_row]).to_csv(RESULTS_DIR_PATH / "final_competition_comparison.csv", index=False)
-    
     return summary_text

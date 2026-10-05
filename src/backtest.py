@@ -23,12 +23,24 @@ def run_backtest(returns: pd.DataFrame, cfg):
     if n <= cfg.TRAIN_WINDOW + 10:
         raise RuntimeError("Not enough data for the selected training window.")
 
-    start = cfg.TRAIN_WINDOW
+    # Allow robustness experiments to hold the OOS dates fixed while changing
+    # the amount of historical data used for fitting.  In normal runs these
+    # attributes are absent and the original TRAIN_WINDOW start is used.
+    start = int(getattr(cfg, "OOS_START_INDEX", cfg.TRAIN_WINDOW))
+    if start < int(cfg.TRAIN_WINDOW):
+        raise ValueError("OOS_START_INDEX must be >= TRAIN_WINDOW to avoid look-ahead.")
 
     if cfg.TEST_DAYS is None:
         end = n
     else:
         end = min(n, start + int(cfg.TEST_DAYS))
+
+    configured_end = getattr(cfg, "OOS_END_INDEX", None)
+    if configured_end is not None:
+        end = min(end, int(configured_end))
+
+    if end <= start:
+        raise RuntimeError("Empty or invalid OOS interval.")
 
     records = []
     tail_records = []

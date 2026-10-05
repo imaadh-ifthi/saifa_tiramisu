@@ -126,7 +126,10 @@ class MultiScaleWaveletVine:
             m = MarginalARQGARCH(tail_quantile=self.tail_quantile)
             m.fit(X[:, i])
 
-            u = m.transform(X[:, i])
+            # IMPORTANT: EVT thresholds were fitted on standardized residuals.
+            # The copula must therefore receive PITs of those same residuals,
+            # not PITs of the raw component returns.
+            u = m.in_sample_pit()
 
             marginals.append(m)
             U_list.append(u)
@@ -299,13 +302,16 @@ class HeavyTailMarginalModel:
         returns = returns.dropna()
         self.asset_names = list(returns.columns)
         self.n_assets = len(self.asset_names)
+        self.marginals = []
         
         X = returns.values
         U_list = []
         for i in range(self.n_assets):
             m = MarginalARQGARCH(tail_quantile=self.tail_quantile)
             m.fit(X[:, i])
-            u = m.transform(X[:, i])
+            # PIT must be computed from the standardized residuals used to fit
+            # EVT, not directly from raw returns.
+            u = m.in_sample_pit()
             self.marginals.append(m)
             U_list.append(u)
             

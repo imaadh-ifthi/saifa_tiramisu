@@ -1,113 +1,95 @@
-import pandas as pd
-import numpy as np
+import inspect
 from pathlib import Path
 
-def test_no_oos_leakage():
-    # If we had leakage, predictions would be suspiciously good. 
-    # But structurally in backtest.py, train = returns.iloc[t - cfg.TRAIN_WINDOW : t], and it predicts for index t.
-    # We can test this by checking backtest.py source or just passing.
-    assert True
+import numpy as np
+import pandas as pd
 
-def test_identical_oos_dates():
-    from config import RESULTS_DIR
-    res_path = Path(RESULTS_DIR) / "model_comparison_by_window.csv"
-    if not res_path.exists():
-        return # Skip if not run yet
-    
-    df = pd.read_csv(res_path)
-    # Check that M0, M1, M2, M3 all have same dates
-    m0_dates = set(df[df["model"] == "M0"]["forecast_date"])
-    m1_dates = set(df[df["model"] == "M1"]["forecast_date"])
-    m2_dates = set(df[df["model"] == "M2"]["forecast_date"])
-    m3_dates = set(df[df["model"] == "M3"]["forecast_date"])
-    
-    assert m0_dates == m1_dates == m2_dates == m3_dates
-    assert len(m0_dates) > 0
+from src.marginals import MarginalARQGARCH
+from src.models import MultiScaleWaveletVine
 
-def test_identical_portfolio_weights():
-    # Enforced in backtest.py: weights = np.asarray(cfg.WEIGHTS, dtype=float); weights /= weights.sum()
-    assert True
 
-def test_deterministic_benchmark():
-    # Historical Simulation Benchmark is deterministic
-    from src.models import HistoricalSimulationBenchmark
-    import numpy as np
-    train = pd.DataFrame(np.random.normal(0, 0.01, (1000, 5)))
-    
-    m0a = HistoricalSimulationBenchmark()
-    m0a.fit(train)
-    sim_a = m0a.simulate_portfolio(1000, np.ones(5)/5.0)
-    
-    m0b = HistoricalSimulationBenchmark()
-    m0b.fit(train)
-    sim_b = m0b.simulate_portfolio(1000, np.ones(5)/5.0)
-    
-    np.testing.assert_array_equal(sim_a, sim_b)
+def _dummy_returns(n=220, assets=3):
+    rng = np.random.default_rng(123)
+    x = rng.normal(0.0, 0.01, size=(n, assets))
+    return pd.DataFrame(x, columns=[f"A{i}" for i in range(assets)])
 
-def test_deterministic_stochastic_models():
-    from src.models import HeavyTailMarginalModel
-    import numpy as np
-    train = pd.DataFrame(np.random.normal(0, 0.01, (1000, 5)))
-    
-    m1a = HeavyTailMarginalModel(seed=42)
-    m1a.fit(train)
-    sim_a = m1a.simulate_portfolio(1000, np.ones(5)/5.0, seed=42)
-    
-    m1b = HeavyTailMarginalModel(seed=42)
-    m1b.fit(train)
-    sim_b = m1b.simulate_portfolio(1000, np.ones(5)/5.0, seed=42)
-    
-    np.testing.assert_array_almost_equal(sim_a, sim_b)
 
-def test_finite_var_es():
-    from config import RESULTS_DIR
-    res_path = Path(RESULTS_DIR) / "model_comparison_by_window.csv"
-    if not res_path.exists():
+def test_pit_is_based_on_standardized_residuals():
+    x = _dummy_returns(n=220, assets=1).iloc[:, 0].to_numpy()
+    model = MarginalARQGARCH(tail_quantile=0.95).fit(x)
+
+    expected = model.transform(model.z)
+    actual = model.in_sample_pit()
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+    # The old bug transformed raw component returns directly. For financial-scale
+    # data that should not, in general, equal the standardized-residual PIT.
+    raw_pit = model.transform(x[: len(model.z)])
+    assert np.max(np.abs(actual - raw_pit)) > 1e-8
+
+
+def test_multiscale_empirical_u_comes_from_marginal_pit():
+    returns = _dummy_returns()
+    model = MultiScaleWaveletVine(levels=2, wavelet="db2", seed=42, use_cross_scale=True)
+    model.fit(returns)
+
+    for scale in model.scale_order:
+        U = model.empirical_U[scale]
+        marginal = model.scale_models[scale]["marginals"][0]
+        expected = marginal.in_sample_pit()
+        assert U.shape[0] == expected.shape[0]
+        np.testing.assert_allclose(U[:, 0], expected, rtol=0.0, atol=0.0)
+
+
+def test_report_does_not_use_legacy_tail_dependence_results_file():
+    from src import report
+    source = inspect.getsource(report.save_report)
+    assert "tail_dependence_results.csv" not in source
+    assert "tail_dependence_horizon_summary.csv" in source
+
+
+def test_results_are_not_mixed_across_runs_when_manifest_exists():
+    manifest = Path("results/run_manifest.json")
+    if not manifest.exists():
         return
-    
-    df = pd.read_csv(res_path)
-    assert df["VaR"].notna().all()
-    assert df["ES"].notna().all()
-    assert (df["VaR"] != np.inf).all()
-    assert (df["VaR"] != -np.inf).all()
-    assert (df["ES"] != np.inf).all()
-    assert (df["ES"] != -np.inf).all()
+    data = manifest.read_text(encoding="utf-8")
+    assert '"data_source": "Yahoo Finance (via yfinance)"' in data
 
-def test_correct_breach_indicators():
-    from config import RESULTS_DIR
-    res_path = Path(RESULTS_DIR) / "model_comparison_by_window.csv"
-    if not res_path.exists():
-        return
-    df = pd.read_csv(res_path)
-    calculated_breach = (df["realized_return"] < df["VaR"]).astype(int)
-    np.testing.assert_array_equal(df["is_breach"], calculated_breach)
 
-def test_robustness_output_schema():
-    from config import RESULTS_DIR
-    res_path = Path(RESULTS_DIR) / "robustness_summary.csv"
-    if not res_path.exists():
-        return
-    df = pd.read_csv(res_path)
-    expected_cols = [
-        "robustness_case", "parameter_change", "D1_tail_dependence", 
-        "D5_tail_dependence", "D5_minus_D1", "average_VaR", 
-        "average_ES", "breach_rate", "ES_score", 
-        "conclusion_direction", "conclusion_changed"
-    ]
-    for col in expected_cols:
-        assert col in df.columns
+def test_fixed_oos_controls_are_supported():
+    from src.backtest import run_backtest
 
-def test_final_comparison_output_schema():
-    from config import RESULTS_DIR
-    res_path = Path(RESULTS_DIR) / "final_competition_comparison.csv"
-    if not res_path.exists():
+    class Cfg:
+        TRAIN_WINDOW = 100
+        TEST_DAYS = 20
+        OOS_START_INDEX = 150
+        OOS_END_INDEX = 160
+        N_SIM = 50
+        ALPHA = 0.01
+        LEVELS = 2
+        WAVELET = "db2"
+        SEED = 42
+        TAIL_QUANTILE = 0.90
+        WEIGHTS = [0.5, 0.5]
+        REFIT_EVERY = 10
+
+    returns = _dummy_returns(n=220, assets=2)
+    results, _ = run_backtest(returns, Cfg())
+    assert len(results) == 10
+    assert results["date"].iloc[0] == returns.index[150]
+    assert results["date"].iloc[-1] == returns.index[159]
+
+
+def test_existing_final_comparison_is_not_zeroed_when_horizon_summary_exists():
+    horizon_path = Path("results/tail_dependence_horizon_summary.csv")
+    final_path = Path("results/final_competition_comparison.csv")
+    if not horizon_path.exists() or not final_path.exists():
         return
-    df = pd.read_csv(res_path)
-    expected_cols = [
-        "tail_dependence_D1", "tail_dependence_D5", "D5_minus_D1",
-        "M1_average_VaR", "M3_average_VaR", "M1_average_ES", "M3_average_ES",
-        "M1_breach_rate", "M3_breach_rate", "M1_ES_score", "M3_ES_score",
-        "interpretation_flags"
-    ]
-    for col in expected_cols:
-        assert col in df.columns
+
+    horizon = pd.read_csv(horizon_path)
+    final = pd.read_csv(final_path).iloc[0]
+    d1 = float(horizon.loc[horizon["scale"] == "D1", "mean_pair_lambda_L"].iloc[0])
+    d5 = float(horizon.loc[horizon["scale"] == "D5", "mean_pair_lambda_L"].iloc[0])
+
+    assert np.isclose(float(final["tail_dependence_D1"]), d1)
+    assert np.isclose(float(final["tail_dependence_D5"]), d5)

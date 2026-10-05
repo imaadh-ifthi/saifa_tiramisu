@@ -25,6 +25,15 @@ class MarginalARQGARCH:
     def __init__(self, tail_quantile: float = 0.95):
         self.tail_quantile = float(tail_quantile)
         self.fitted = False
+        self.vol_method = None
+        self.mu_y = None
+        self.phi = 0.0
+        self.omega = None
+        self.alpha = None
+        self.beta = None
+        self.last_y = None
+        self.last_eps = None
+        self.last_sigma2 = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -49,7 +58,7 @@ class MarginalARQGARCH:
 
         var_next = lam * sigma2[-1] + (1.0 - lam) * eps[-1] ** 2
 
-        return z, mu, var_next
+        return z, mu, var_next, float(sigma2[-1])
 
     def _get_param(self, params: dict, candidates, default: float) -> float:
         """
@@ -177,14 +186,32 @@ class MarginalARQGARCH:
             var_next_y = max(float(var_next_y), 1e-12)
 
             z = std_resid
+            self.vol_method = "garch"
+            self.mu_y = float(mu)
+            self.phi = float(phi)
+            self.omega = float(omega)
+            self.alpha = float(alpha)
+            self.beta = float(beta)
+            self.last_y = float(y[-1])
+            self.last_eps = float(eps_last)
+            self.last_sigma2 = float(sigma_last ** 2)
 
         except Exception:
             # ----------------------------------------------------------
             # Fallback EWMA
             # ----------------------------------------------------------
-            z, mu_y, var_next_y = self._ewma_z(y)
+            z, mu_y, var_next_y, last_sigma2 = self._ewma_z(y)
             mean_next_y = mu_y
             var_next_y = max(float(var_next_y), 1e-12)
+            self.vol_method = "ewma"
+            self.mu_y = float(mu_y)
+            self.phi = 0.0
+            self.omega = None
+            self.alpha = None
+            self.beta = None
+            self.last_y = float(y[-1])
+            self.last_eps = float(y[-1] - mu_y)
+            self.last_sigma2 = float(last_sigma2)
 
         # --------------------------------------------------------------
         # Clean standardized residuals
@@ -244,6 +271,58 @@ class MarginalARQGARCH:
         self.fitted = True
 
         return self
+
+    # ------------------------------------------------------------------
+    # In-sample PIT from the fitted standardized residuals
+    # ------------------------------------------------------------------
+    def in_sample_pit(self) -> np.ndarray:
+        """Return PIT values for the exact standardized residual sample used by EVT."""
+        if not self.fitted:
+            raise RuntimeError("Marginal model is not fitted.")
+        return self.transform(self.z)
+
+    # ------------------------------------------------------------------
+    # Standardize post-fit observations without refitting the model
+    # ------------------------------------------------------------------
+    def standardize_new(self, x: np.ndarray) -> np.ndarray:
+        """Filter new observations through the fitted mean/volatility model."""
+        if not self.fitted:
+            raise RuntimeError("Marginal model is not fitted.")
+
+        x = np.asarray(x, dtype=float)
+        if x.size == 0:
+            return np.array([], dtype=float)
+
+        y = x * self.scale
+        z = np.empty_like(y, dtype=float)
+
+        prev_y = float(self.last_y)
+        prev_eps = float(self.last_eps)
+        prev_sigma2 = float(self.last_sigma2)
+
+        for i, yi in enumerate(y):
+            if self.vol_method == "garch":
+                mean_i = self.mu_y + self.phi * (prev_y - self.mu_y)
+                sigma2_i = (
+                    self.omega
+                    + self.alpha * prev_eps**2
+                    + self.beta * prev_sigma2
+                )
+                sigma2_i = max(float(sigma2_i), 1e-12)
+            else:
+                mean_i = self.mu_y
+                # Continue the same EWMA recursion used by the fallback.
+                sigma2_i = 0.94 * prev_sigma2 + 0.06 * prev_eps**2
+                sigma2_i = max(float(sigma2_i), 1e-12)
+
+            eps_i = float(yi - mean_i)
+            z[i] = eps_i / np.sqrt(sigma2_i)
+
+            prev_y = float(yi)
+            prev_eps = eps_i
+            prev_sigma2 = sigma2_i
+
+        return z
 
     # ------------------------------------------------------------------
     # Transform residuals to uniforms

@@ -24,7 +24,18 @@ def load_returns(force_refresh: bool = False) -> pd.DataFrame:
 
     if cache_path.exists() and not force_refresh:
         returns = pd.read_csv(cache_path, index_col=0, parse_dates=True)
-        return returns
+
+        # Normalize legacy cache naming before returning cached data.  An older
+        # generated file used ``BT-CUSD`` for Bitcoin; the current canonical
+        # ticker is ``BTC-USD`` from config.ASSETS.
+        if "BT-CUSD" in returns.columns and "BTC-USD" not in returns.columns:
+            returns = returns.rename(columns={"BT-CUSD": "BTC-USD"})
+
+        expected = list(ASSETS.keys())
+        if all(col in returns.columns for col in expected):
+            return returns[expected].dropna()
+
+        print("[Data] Cached returns are missing expected assets; refreshing from Yahoo Finance...")
 
     tickers = list(ASSETS.keys())
 
