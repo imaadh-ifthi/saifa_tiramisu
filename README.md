@@ -309,7 +309,7 @@ The project produces three separate findings.
 
 ### Finding 1 — Tail dependence is scale-dependent in the selected sample
 
-The D1 and D5 lower-tail estimates differ, and the reported bootstrap interval for D5 − D1 excludes zero.
+The D1 and D5 lower-tail estimates differ in point estimate, but the updated bootstrap interval for D5 − D1 includes zero. The evidence for a difference is therefore not statistically conclusive in this snapshot.
 
 This is evidence of **timescale-specific downside co-movement in this sample**.
 
