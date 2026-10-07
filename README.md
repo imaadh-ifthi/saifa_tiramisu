@@ -11,6 +11,28 @@ A reproducible research framework for testing whether portfolio tail dependence 
 
 ---
 
+##  Quickstart: One-Command Reproduction
+
+Run the full pipeline or smoke test directly from your terminal:
+
+```bash
+# 1. Clone & install
+git clone https://github.com/imaadh-ifthi/saifa_tiramisu.git
+cd saifa_tiramisu
+pip install -r requirements.txt
+
+# 2. Fast 30-second smoke test
+python main.py --quick
+
+# 3. Full end-to-end experiment (1,764 OOS days + robustness + report)
+python main.py
+
+# 4. Run test suite (61 tests)
+pytest tests/
+```
+
+---
+
 ## 1. What are we trying to answer?
 
 > **Does tail dependence change with investment horizon, and what does ignoring it do to a portfolio's measured risk?**
@@ -61,29 +83,27 @@ In the main 2015–2019 dependence sample, the mean finite-threshold lower-tail 
 |---|---:|
 | D1 | 0.0701 |
 | D2 | 0.0701 |
-| D3 | 0.0541 |
-| D4 | 0.0939 |
-| **D5** | **0.0334** |
+| D3 | 0.0557 |
+| D4 | 0.0924 |
+| **D5** | **0.0525** |
 | S5 | 0.0764 |
 
-The paired **D5 − D1 difference is −0.0366**, with reported ordinary-bootstrap 95% interval **[−0.0685, −0.0080]**.
-
-This supports a difference between the two endpoint scales under the reported procedure. It does **not** show a monotonic decline with scale: D4 is actually the largest point estimate.
+The paired **D5 − D1 difference is −0.0175**, with ordinary-bootstrap 95% interval **[−0.0494, 0.0111]**. In this updated snapshot, the interval includes zero, showing that empirical horizon differences remain sample-sensitive.
 
 ### The richer forecasting models do not currently calibrate well enough
 
-Across 1,764 out-of-sample observations:
+Across 1,764 out-of-sample observations (target: ~1% breaches):
 
 | Model | Description | VaR breaches | Breach rate | Status |
 |---|---|---:|---:|---|
-| **M0** | Historical simulation | 21 | **1.19%** | Eligible |
-| **M1** | AR-GARCH/EVT + copula | 24 | **1.36%** | Eligible |
-| M2 | Wavelet + within-scale copulas | 136 | **7.71%** | Ineligible |
-| M3 | M2 + cross-scale coupling | 127 | **7.20%** | Ineligible |
+| **M0** | Historical simulation | 21 | **1.19%** | Eligible (Selected) |
+| **M1** | AR-GARCH/EVT + copula | 25 | **1.42%** | Eligible |
+| M2 | Wavelet + within-scale copulas | 202 | **11.45%** | Ineligible |
+| M3 | M2 + cross-scale coupling | 190 | **10.77%** | Ineligible |
 
-The target for a 99% VaR is approximately **1%** breaches.
+The target for a 99% VaR is approximately **1%** breaches (17.64 expected).
 
-M3 improves on M2 by about **0.51 percentage points**, but remains far from the required calibration level. Therefore the multiscale models are currently used as **diagnostic/research models**, not as models that justify lower operational risk limits.
+M3 improves on M2 by about **0.68 percentage points** (breaches fall from 202 to 190), confirming that cross-scale interaction is present, but it remains far from operational calibration. Therefore the multiscale models are used as **diagnostic/research models**, not for production risk limits.
 
 ---
 
@@ -100,14 +120,14 @@ Under that rule:
 
 | Model | Coverage p | Independence p | Corrected mean FZ0 | Eligible? |
 |---|---:|---:|---:|---|
-| **M0** | 0.435 | 0.249 | **−2.8080** | Yes |
-| **M1** | 0.149 | 0.416 | **−2.7862** | Yes |
-| M2 | ~0 | 0.00155 | 0.8775 | No |
-| M3 | ~0 | 0.00448 | 0.3344 | No |
+| **M0** | **0.435** | **0.249** | **−2.8080** | **Yes (Selected)** |
+| **M1** | 0.097 | 0.396 | **−2.7475** | Yes |
+| M2 | < 10⁻¹⁰⁰ | < 10⁻¹⁵ | Severe penalty | No |
+| M3 | < 10⁻¹⁰⁰ | < 10⁻¹³ | Severe penalty | No |
 
 So M0 is selected because it is the **best-performing eligible model under the predefined rule**, not because it is the baseline.
 
-The M0–M1 FZ0 difference is small and no formal significance test of the difference is provided. The correct interpretation is therefore **conditional model selection**, not proof that historical simulation is universally superior.
+The M0–M1 FZ0 difference is modest and no formal significance test of the difference is provided. The correct interpretation is therefore **conditional model selection**, not proof that historical simulation is universally superior.
 
 ---
 
