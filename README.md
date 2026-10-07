@@ -1,300 +1,526 @@
-# Quant Edge 1.0: Wavelet-Copula Market Risk Framework
+# Quant Edge 1.0 — Tiramisu_
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Challenge: SAIFA Quant Edge 1.0](https://img.shields.io/badge/SAIFA-Quant%20Edge%201.0-green.svg)](https://saifa.org)
+## Risk Across Tails and Timescales
 
-A study of whether joint downside behaviour differs across wavelet timescales, and whether a richer dependence model improves daily portfolio VaR / ES forecasts. It combines **normalized stationary wavelet (SWT/MODWT-equivalent) decomposition**, **AR(1)-GARCH(1,1) filtering**, **EVT generalized Pareto tails**, **regular vine copulas** (Gaussian fallback) and a **cross-scale Gaussian coupler**.
+A reproducible research framework for testing whether portfolio tail dependence changes across wavelet timescales, and what happens to measured portfolio risk when that structure is ignored.
 
-> **Status of this document.** It follows the project report ("Revised report draft"). The report's scoring was **corrected from saved forecasts** and the full refit of M1-M3 has **not** been independently regenerated. See [Known Issues & Reproducibility Status](#known-issues--reproducibility-status) before relying on any generated file in `results/`.
-
----
-
-## Table of Contents
-
-1. [Research Question](#research-question)
-2. [Executive Summary](#executive-summary)
-3. [Portfolio and Experimental Design](#portfolio-and-experimental-design)
-4. [Models Compared](#models-compared)
-5. [Methodology](#methodology)
-6. [Results](#results)
-7. [Recommendation](#recommendation)
-8. [Known Issues & Reproducibility Status](#known-issues--reproducibility-status)
-9. [Installation & Usage](#installation--usage)
-10. [CLI Reference](#cli-reference)
-11. [Project Directory Layout](#project-directory-layout)
-12. [AI Disclosure](#ai-disclosure)
+**Challenge:** SAIFA Quant Edge 1.0 — Initial Screening Challenge  
+**Team:** Tiramisu_ — University of Peradeniya  
+**Primary assets:** SPY, IEF, GLD, USO, BTC-USD  
+**Risk measures:** 99% VaR and Expected Shortfall (ES)
 
 ---
 
-## Research Question
+## 1. What are we trying to answer?
 
-> **Does tail dependence change with investment horizon, and what does ignoring it do to measured risk?**
+> **Does tail dependence change with investment horizon, and what does ignoring it do to a portfolio's measured risk?**
 
-Wavelet scales are frequency bands *within daily returns*. They are not direct estimates of multi-day holding-period VaR. The model comparisons test the present architecture rather than isolating a universal causal effect of ignoring horizon dependence.
+The project separates this question into two experiments:
 
----
+1. **Dependence experiment:** measure whether downside co-exceedances differ across wavelet scales.
+2. **Forecasting experiment:** test whether adding increasingly rich dependence structure improves out-of-sample 99% VaR/ES forecasts.
 
-## Executive Summary
+This distinction is important. A model can detect interesting multiscale dependence without necessarily producing a better operational risk forecast.
 
-- **Dependence differs between endpoint scales, but not monotonically.** In the 2015-2019 analysis sample, the mean finite-threshold lower-tail coefficient (q = 0.05) is **0.0701 at D1** and **0.0334 at D5**. The paired D5 − D1 difference is **−0.0366** with an ordinary bootstrap 95% interval **[−0.0685, −0.0080]**. D4 has the highest coefficient, so there is no steady decline with scale. The result is sensitive to sample and bootstrap assumptions, and the BH-adjusted p-value for D5 is exactly 0.05 (borderline). No individual asset-pair difference survives FDR correction.
-- **The multiscale forecasts under-cover realized losses.** Across 1,764 out-of-sample days (2018-12-24 to 2025-12-30), M2 and M3 breach their 99% VaR on **7.71%** and **7.20%** of days (target 1%). Both fail the coverage and independence diagnostics.
-- **M0 and M1 are not rejected** by those diagnostics (breach rates 1.19% and 1.36%). A non-rejection is not proof of correct calibration.
-- **Corrected scoring selects M0.** The repository's original FZ0 implementation had a sign error. After correcting it, the implemented selection rule prefers **M0 (historical simulation)** over M1: corrected mean FZ0 **−2.8080 (M0)** vs **−2.7862 (M1)**. The gap (about 0.022) is small and untested, so it is **not** evidence of statistically significant superiority.
-- **Recommendation:** keep historical simulation as the operational baseline for this tested setting (M1 as comparator) and use multiscale analysis as a **diagnostic**, not to justify reduced risk limits.
+Wavelet scales in this project are **frequency bands within daily returns**. They are not direct estimates of multi-day holding-period VaR.
 
 ---
 
-## Portfolio and Experimental Design
+## 2. The central idea
 
-### Portfolio and data
+Financial losses are not driven only by the behaviour of individual assets. Assets can become more strongly connected in their downside tails, and that relationship can depend on the timescale of the return component being examined.
 
-Equal-weighted (20% each) return proxy for five liquid instruments:
+Our framework therefore moves through four increasingly structured models:
 
-| Instrument | Exposure | Weight |
-| :-- | :-- | :-- |
-| SPY | US equity ETF | 20% |
-| IEF | US Treasury 7-10 year ETF | 20% |
-| GLD | Gold ETF | 20% |
-| USO | Oil futures exposure through an ETF | 20% |
-| BTC-USD | Bitcoin against the US dollar | 20% |
-
-These instruments provide contrasting equity, bond, commodity and cryptocurrency exposures. Equal weights keep the comparison transparent and avoid fitting weights to the evaluation sample. The 2015-2025 period provides a long common history and includes the 2020 market shock.
-
-**Data handling.** Yahoo Finance via `yfinance`, adjusted prices. SPY defines the calendar; prices are forward-filled for at most five rows; incomplete rows are dropped. Asset log returns are ln(P_t / P_{t-1}). The portfolio proxy is the **weighted sum of asset log returns**, which approximates, but is not exactly, the log return of a rebalanced portfolio. Bitcoin returns across stock-market closures span those calendar gaps. USO is a fund proxy with futures-roll effects, not a spot-oil investment.
-
-### Evaluation settings
-
-| Setting | Value |
-| :-- | :-- |
-| Aligned sample | 5 Jan 2015 to 30 Dec 2025; 2,764 rows |
-| Forecast evaluation | 24 Dec 2018 to 30 Dec 2025; 1,764 dates |
-| Training and refit | Trailing 1,000 rows; refit every 21 trading days |
-| Risk and simulation | Lower-tail α = 0.01; 2,000 draws per model and forecast |
-| Tails and seed | EVT tails beyond the 5th and 95th percentiles; seed 42 |
-
----
-
-## Models Compared
-
-| ID | Specification |
-| :-- | :-- |
-| **M0** | Historical simulation of the weighted return proxy |
-| **M1** | AR-GARCH/EVT marginals and an attempted five-asset vine copula on raw returns (no wavelets) |
-| **M2** | Wavelet components, scale-specific marginals and within-scale copulas (**no** cross-scale coupling) |
-| **M3** | M2 plus Gaussian stress-rank coupling across scales |
-
-M2 vs M3 isolates cross-scale coupling. M1 vs M2 differs in decomposition, marginals and reconstruction as well as dependence, so it does **not** isolate the effect of ignoring horizon dependence.
-
----
-
-## Methodology
-
-### 1. Wavelet components
-
-`pywt.swt` with `db4`, 5 levels, `norm=True`, `trim_approx=True`; each detail and the smooth component is reconstructed separately with `iswt`:
-
+```text
+M0  Historical simulation
+        |
+        v
+M1  Heavy-tailed marginals + cross-asset dependence
+        |
+        v
+M2  Wavelet decomposition + scale-specific dependence
+        |
+        v
+M3  M2 + explicit cross-scale coupling
 ```
+
+The purpose of M2 and M3 is not to assume that a more complicated model must win. Their purpose is to **test whether the additional structure earns its complexity out of sample**.
+
+That is why the benchmark is kept in the experiment from beginning to end.
+
+---
+
+## 3. Main result at a glance
+
+### Dependence changes across timescales
+
+In the main 2015–2019 dependence sample, the mean finite-threshold lower-tail coefficient at `q = 0.05` is:
+
+| Scale | Mean lower-tail coefficient |
+|---|---:|
+| D1 | 0.0701 |
+| D2 | 0.0701 |
+| D3 | 0.0541 |
+| D4 | 0.0939 |
+| **D5** | **0.0334** |
+| S5 | 0.0764 |
+
+The paired **D5 − D1 difference is −0.0366**, with reported ordinary-bootstrap 95% interval **[−0.0685, −0.0080]**.
+
+This supports a difference between the two endpoint scales under the reported procedure. It does **not** show a monotonic decline with scale: D4 is actually the largest point estimate.
+
+### The richer forecasting models do not currently calibrate well enough
+
+Across 1,764 out-of-sample observations:
+
+| Model | Description | VaR breaches | Breach rate | Status |
+|---|---|---:|---:|---|
+| **M0** | Historical simulation | 21 | **1.19%** | Eligible |
+| **M1** | AR-GARCH/EVT + copula | 24 | **1.36%** | Eligible |
+| M2 | Wavelet + within-scale copulas | 136 | **7.71%** | Ineligible |
+| M3 | M2 + cross-scale coupling | 127 | **7.20%** | Ineligible |
+
+The target for a 99% VaR is approximately **1%** breaches.
+
+M3 improves on M2 by about **0.51 percentage points**, but remains far from the required calibration level. Therefore the multiscale models are currently used as **diagnostic/research models**, not as models that justify lower operational risk limits.
+
+---
+
+## 4. Why M0 can be selected even though it is the baseline
+
+M0 is the benchmark, but it is **not automatically declared the winner**.
+
+The implemented selection rule is:
+
+1. Reject models that fail either the unconditional coverage or breach-independence diagnostic at the 5% level.
+2. Among the remaining models, prefer the lower mean Fissler–Ziegel FZ0 loss.
+
+Under that rule:
+
+| Model | Coverage p | Independence p | Corrected mean FZ0 | Eligible? |
+|---|---:|---:|---:|---|
+| **M0** | 0.435 | 0.249 | **−2.8080** | Yes |
+| **M1** | 0.149 | 0.416 | **−2.7862** | Yes |
+| M2 | ~0 | 0.00155 | 0.8775 | No |
+| M3 | ~0 | 0.00448 | 0.3344 | No |
+
+So M0 is selected because it is the **best-performing eligible model under the predefined rule**, not because it is the baseline.
+
+The M0–M1 FZ0 difference is small and no formal significance test of the difference is provided. The correct interpretation is therefore **conditional model selection**, not proof that historical simulation is universally superior.
+
+---
+
+## 5. Models compared
+
+### M0 — Historical Simulation
+
+Directly estimates the empirical distribution of the weighted portfolio return proxy.
+
+**Purpose:** simple, transparent benchmark.
+
+### M1 — Heavy-Tail Marginals + Cross-Asset Dependence
+
+For each asset:
+
+- AR(1)-GARCH(1,1) volatility filtering
+- empirical central distribution
+- generalized Pareto tails (EVT)
+- probability integral transform (PIT)
+
+The transformed asset returns are then modelled jointly using an attempted five-asset R-vine copula, with a regularized Gaussian fallback.
+
+**Purpose:** test whether explicit heavy tails and cross-asset dependence improve over historical simulation without introducing wavelet scales.
+
+### M2 — Wavelet + Within-Scale Dependence
+
+Each asset is decomposed into five detail components and one smooth component:
+
+```text
 r_t = D1_t + D2_t + D3_t + D4_t + D5_t + S5_t
 ```
 
-Approximate bands: D1 1-2 d, D2 2-4 d, D3 4-8 d, D4 8-16 d, D5 16-32 d, S5 > 32 d. Inputs get 250 observations of **symmetric padding** on each side (plus right padding to a multiple of 32); components are cropped back to the original length. This reduces periodic wrap-around, but reflected boundary observations remain an approximation. Exact reconstruction of the training series does not establish correct out-of-sample reconstruction or equivalence of scales to investment holding periods.
+Each scale receives its own marginal model and within-scale dependence model.
 
-### 2. Marginals
+**Purpose:** test whether modelling risk separately across timescales changes the resulting portfolio tail forecast.
 
-Each raw return series (M1) or reconstructed component (M2/M3) is fitted with **AR(1)-GARCH(1,1)** (Gaussian likelihood, EWMA λ = 0.94 fallback if the fit fails). Standardized residuals have an empirical centre and **generalized Pareto tails** beyond the 5th/95th percentiles. Stability choices: residuals clipped to [−15, 15], GPD shape to [−0.49, 0.49]. The PIT is applied to the fitted standardized residuals, consistent with the EVT fitting sample. Simulation inverts the fitted residual distribution and restores the stored forecast mean and volatility.
+### M3 — Full Cross-Scale Model
 
-### 3. Dependence and simulation
+M3 extends M2 by adding a Gaussian cross-scale coupling layer.
 
-- **Within a scale:** an R-vine fit with BIC controls is attempted via `pyvinecopulib`, with a regularized Gaussian copula fallback. Exceptions are suppressed and the run manifest does not record which backend was used, so **no claim is made that every archived fit used an R-vine or BIC selection.**
-- **Across scales (M3):** each scale's PIT vector is summarized as a mean normal-score stress score; a Gaussian copula is fitted on the six scalar stress scores, and simulated scale rows are paired by rank while preserving within-scale scenarios. Summed components are weighted to form the portfolio proxy.
+Each scale is summarized by a scalar stress score derived from the mean normal-score PIT across assets. A Gaussian copula is then used to rank-pair simulated scale scenarios while preserving each scale's within-scale scenario structure.
 
-### 4. Tail-dependence estimator
-
-For an asset pair and threshold q:
-
-```
-lambda_L(q) = count(U_i < q and U_j < q) / (n * q)
-```
-
-Primary q = 0.05 (sensitivity: 0.025 and 0.10). Under independent uniform PITs the reference value is q. These are **finite-threshold** coefficients, not limits as q → 0. The headline value is the mean of the ten pairwise coefficients. The bootstrap resamples time rows independently with 2,000 resamples, holds fitted transformations fixed, and uses paired resampling for scale-vs-D1 differences with Benjamini-Hochberg FDR correction. It ignores serial dependence, model-estimation uncertainty and boundary effects, so intervals should be treated as **exploratory**.
-
-### 5. Forecast timing (what is updated between refits)
-
-Every fitted window ends before its forecast origin and the wavelet decomposition occurs inside that window, so no post-origin observations enter a fit. However means and volatilities are stored at the refit date and **not updated on intervening days**: new simulation seeds are used daily, but distributions stay frozen for up to 21 trading days. These are dated out-of-sample forecasts under a periodic-refit design, not fully updated daily conditional GARCH forecasts.
-
-### 6. Risk measures and validation
-
-- VaR is the 1st percentile of the simulated return distribution; ES is the mean at or below it. Negative values are losses. A breach is a realized return below the forecast VaR. A calibrated 99% threshold gives about 17.64 breaches in 1,764 days.
-- **Kupiec** unconditional coverage and **Christoffersen** independence tests.
-- **Fissler-Ziegel FZ0 joint VaR/ES loss** (lower is better), with ES e < 0:
-
-```
-L_FZ0(y, v, e) = - I(y <= v) * (v - y) / (alpha * e) + v / e + ln(-e) - 1
-```
-
-> The **original repository code used a positive sign on the first term** (`src/backtests.py`, `term1`), which made larger breaches *reduce* the loss and invalidated the earlier scores and the M1 recommendation derived from them. See [Known Issues](#known-issues--reproducibility-status).
-
-- **Selection rule:** a model is eligible only if both the Kupiec and Christoffersen p-values are ≥ 0.05; among eligible models, the lowest (corrected) FZ0 loss is preferred.
+**Purpose:** test whether dependence between timescales contains additional information beyond modelling each scale independently.
 
 ---
 
-## Results
+## 6. Methodology
 
-### Out-of-sample VaR validation (1,764 days)
+### 6.1 Data
 
-| Model | Breaches | Rate | Mean VaR | Coverage p | Independence p |
-| :-- | :-- | :-- | :-- | :-- | :-- |
-| M0 | 21 | 1.19% | −3.17% | 0.435 | 0.249 |
-| M1 | 24 | 1.36% | −2.94% | 0.149 | 0.416 |
-| M2 | 136 | 7.71% | −1.39% | 4.23e-73 | 0.00155 |
-| M3 | 127 | 7.20% | −1.46% | 5.85e-65 | 0.00448 |
+Five assets with equal 20% weights:
 
-Neither test rejects M0 or M1 at 5%; M2 and M3 fail both because their VaR thresholds lie too close to zero. Cross-scale coupling lowers the breach rate from 7.71% (M2) to 7.20% (M3), about 0.51 percentage points. Whether that improvement is statistically significant has not been tested, and M3 still breaches about seven times the nominal frequency.
+| Asset | Role |
+|---|---|
+| SPY | US equities |
+| IEF | US intermediate Treasuries |
+| GLD | Gold |
+| USO | Oil exposure via ETF |
+| BTC-USD | Bitcoin |
 
-### Expected Shortfall and corrected FZ0
+Data are downloaded through `yfinance` using adjusted prices. SPY defines the calendar; prices are forward-filled for at most five rows and incomplete rows are removed.
 
-| Model | Mean ES | Original score (sign bug) | Corrected FZ0 | Eligible |
-| :-- | :-- | :-- | :-- | :-- |
-| M0 | −5.36% | −3.8875 | **−2.8080** | Yes |
-| M1 | −3.85% | −4.2653 | −2.7862 | Yes |
-| M2 | −1.61% | −9.4896 | 0.8775 | No |
-| M3 | −1.70% | −8.8381 | 0.3344 | No |
+Asset log returns are:
 
-M0 has the lowest corrected loss among eligible models, so the rule selects **M0**. The small-magnitude ES of M2/M3 does **not** indicate lower risk: it accompanies severe VaR under-coverage and worse corrected scores. Average ES over all dates is not comparable to average loss on breach dates, which condition on different observations.
+```text
+r_t = ln(P_t / P_{t-1})
+```
 
-> The "corrected" values were obtained by rescoring the same saved forecasts per the report. The files currently in `results/` may still show the original scores until the pipeline is re-run with the sign fix applied.
+The portfolio proxy is the weighted sum of asset log returns. This is a transparent approximation to a rebalanced portfolio log return, not an exact rebalanced-portfolio calculation.
 
-### Tail dependence by scale (lower tail, q = 0.05, 2015-2019 sample)
+### 6.2 Wavelet decomposition
 
-The multiscale model is fitted on 1,257 observations; the saved pairwise table has 1,256 aligned PIT rows. Independence reference = 0.05.
+The implementation uses PyWavelets stationary wavelet transforms with:
 
-| Scale | Mean λ_L | 95% interval | Difference from D1 |
-| :-- | :-- | :-- | :-- |
-| D1 | 0.0701 | [0.0462, 0.0971] | – |
-| D2 | 0.0701 | [0.0462, 0.0971] | +0.0000 |
-| D3 | 0.0541 | [0.0382, 0.0717] | −0.0159 |
-| D4 | 0.0939 | [0.0669, 0.1258] | +0.0239 |
-| D5 | 0.0334 | [0.0191, 0.0510] | **−0.0366** |
-| S5 | 0.0764 | [0.0557, 0.0987] | +0.0064 |
+- wavelet: `db4`
+- levels: `5`
+- `norm=True`
+- separate reconstruction of each detail and the smooth component
+- symmetric boundary padding
 
-D5 − D1 has paired 95% interval [−0.0685, −0.0080], supporting a difference between these two endpoint scales under the reported procedure. It does not establish a steady decrease with scale. (D1 and D2 report identical values and intervals in the saved table; this is unexplained and worth verifying.)
+This is a **normalized SWT/MODWT-equivalent implementation**. It is not a direct claim that the resulting bands are literal investment holding periods.
 
-### Stress period (descriptive)
+### 6.3 Marginal tail model
 
-The stress comparison fits marginals to 2015-2019, carries them through January 2020, and applies them to the **104** aligned observations from February to June 2020. Wavelet components use data through June, so this is not a sequence of real-time stress forecasts. Coefficients rise at every scale at q = 0.10. Because stress-period PITs use pre-stress transformations, the changes combine altered marginal exceedance rates with joint co-movement and should **not** be read as pure copula-dependence changes.
+Each raw return series in M1, or each reconstructed wavelet component in M2/M3, is filtered using:
 
-### Robustness (D5 − D1, first forecast training window)
+```text
+AR(1) mean + GARCH(1,1) volatility
+                    |
+                    v
+          standardized residuals
+                    |
+            empirical centre
+              + GPD tails
+                    |
+                   PIT
+```
 
-Common 252-date evaluation period 2018-12-24 to 2019-12-23; dependence comparison uses the first 1,000 training observations (ending 21 Dec 2018) with 500 resamples. This differs from the 2015-2019 sample and 2,000 resamples above.
+The EVT tails begin beyond the 5th and 95th percentiles.
 
-| Case | Change | D5 − D1 | 95% interval | p-value |
-| :-- | :-- | :-- | :-- | :-- |
-| Baseline | – | −0.032 | [−0.069, 0.004] | 0.088 |
-| A | `TAIL_QUANTILE = 0.90` | −0.044 | [−0.081, −0.010] | 0.016 |
-| B | `TRAIN_WINDOW = 750` | −0.064 | [−0.108, −0.029] | 0.000 |
-| C | `N_SIM = 1000` | −0.032 | [−0.069, 0.004] | 0.088 |
-| D | `SEED = 99` | −0.032 | [−0.065, −0.002] | 0.044 |
+A failed GARCH fit falls back to EWMA with decay `0.94`.
 
-All point estimates have D1 above D5. The baseline and Monte Carlo intervals include zero; the EVT, shorter-window and seed-99 intervals exclude it. The seed-only change illustrates bootstrap sensitivity. Changing the Monte Carlo count does not change the empirical dependence estimates, as expected. **Legacy robustness ES scores are excluded** because alternative-case daily forecasts were not saved for rescoring.
+Stability constraints in the implementation clip standardized residuals to `[-15, 15]` and fitted GPD shape to `[-0.49, 0.49]`.
 
----
+### 6.4 Dependence model
 
-## Recommendation
+Within each scale the framework attempts an R-vine fit with BIC controls. A regularized Gaussian copula is available as a fallback.
 
-For this portfolio proxy and the archived evaluation:
+For M3, a separate cross-scale Gaussian coupler operates on six scalar stress scores.
 
-1. **Retain M0 historical simulation** as the primary risk-monitoring baseline, with **M1 as a comparator**. M0 satisfies the calibration filters, has the breach rate closest to 1%, and the lowest corrected FZ0 among eligible models. Treat M0's small loss edge over M1 as a conditional selection result.
-2. **Use multiscale analysis as a diagnostic** to flag periods when diversification appears weaker, **not** to reduce risk limits. Current M2/M3 VaR and ES values are too small.
-3. **Before reconsidering M2/M3 for operational forecasting:** update conditional states between refits, repair AR mean-parameter handling, verify and log the copula backend, and rerun the complete out-of-sample experiment with recorded dependencies. Support any calibration change with subsequent evaluation rather than accepting a model because it is more complex.
+The implementation therefore does **not** claim that every archived scale fit successfully used a full R-vine. The saved run should record the backend used for future audited runs.
 
-**Limits of the evidence.** Equal-weighted liquid proxies and a weighted-log-return approximation; liquidity, trading costs and capital requirements are not modelled. The ordinary bootstrap ignores serial dependence (a block bootstrap and common-sample comparison would strengthen inference). Stress has only 104 observations. Pairwise effects are heterogeneous. No significance test is provided for the corrected score differences. Conclusions describe the archived implementation and forecasts, not an idealized fully updated wavelet-vine model.
+### 6.5 Tail-dependence estimator
 
----
+For an asset pair and threshold `q`:
 
-## Known Issues & Reproducibility Status
+```text
+lambda_L(q) = count(U_i < q and U_j < q) / (n q)
+```
 
-| Issue | Where | Status |
-| :-- | :-- | :-- |
-| **FZ0 sign error** | `src/backtests.py` (`term1` positive) | Documented in the report; correction rescored saved forecasts and changes the selected model from M1 to M0. **Apply the fix and regenerate** so `final_validation_summary.*`, `final_competition_comparison.csv` and generated recommendations agree with this README. |
-| **AR mean parameters** | `src/marginals.py` (`_get_param` lookups `mu`/`constant`/`c`, `ar[1]`) | Candidate names omit `arch`'s usual labels (e.g. `Const`), so the fitted AR mean may not be restored in forecasts. Requires regenerating forecasts. |
-| **Frozen state between refits** | `src/backtest.py`, `src/models.py` | Mean/volatility held up to 21 days. |
-| **Copula backend not logged** | `src/copulas.py` | Exceptions suppressed; vine vs Gaussian fallback not recorded. |
-| **Exploratory bootstrap** | `src/tail_dependence.py` | iid row resampling; no block bootstrap. |
-| **Dependencies unpinned** | `requirements.txt` | Lower bounds only; exact library versions are not recorded. |
-| **Manifest checksum** | `results/run_manifest.json` | The original data digest differs from a re-serialization of the cached file in the audit environment; use a byte-level checksum and a fixed environment for a fresh reproducible run. |
+The primary threshold is `q = 0.05`, with `q = 0.025` and `q = 0.10` used as sensitivity checks.
 
-**What was independently checked (per the report):** date alignment; realized returns vs cached weighted-return series; recomputed breach counts and coverage/independence statistics; reconstructed M0 VaR/ES forecasts from cached returns using the implemented refit schedule (max absolute error < 1.1e-16); rescoring of all four models with the corrected FZ0; aggregate dependence point estimates vs the mean of saved pairwise event counts. Source commit: `c1310e8508da0a6a8e7dcb73f6c0f12e2f95c9ad`.
+These are finite-threshold co-exceedance coefficients, not asymptotic tail-dependence limits as `q -> 0`.
 
-**Not independently regenerated:** the full M1-M3 model fits and the bootstrap confidence intervals (source analysis tables are preserved in the evidence pack). One-command end-to-end reproduction of the report remains to be confirmed after the remaining fixes.
+### 6.6 Risk measures
+
+For each model and forecast date:
+
+- **VaR:** 1st percentile of the simulated portfolio return distribution
+- **ES:** mean simulated return at or below the VaR threshold
+
+Negative values correspond to losses.
 
 ---
 
-## Installation & Usage
+## 7. Out-of-sample design
+
+The common aligned sample contains **2,764 observations** from **5 January 2015 to 30 December 2025**.
+
+The forecasting evaluation begins on **24 December 2018** and contains **1,764 dates**.
+
+| Setting | Value |
+|---|---:|
+| Training window | 1,000 observations |
+| Refit frequency | Every 21 trading days |
+| Monte Carlo draws | 2,000 per forecast |
+| VaR level | 99% |
+| EVT thresholds | 5% / 95% |
+| Main random seed | 42 |
+
+Every fitting window ends before its forecast origin. Therefore post-origin observations are not used to fit the corresponding forecast.
+
+**Important:** conditional means and volatilities are currently stored at refit time and held fixed between refits. The system is therefore a **periodic-refit out-of-sample framework**, not a fully state-updated daily GARCH implementation.
+
+---
+
+## 8. Validation
+
+### Calibration
+
+We use:
+
+- **Kupiec unconditional coverage test**
+- **Christoffersen independence diagnostic**
+
+At 99% VaR, a calibrated model should produce about **17.64 breaches in 1,764 observations**.
+
+### Joint VaR/ES scoring
+
+The study also uses the return-based **FZ0 joint VaR/ES loss**. Lower average loss is preferred.
+
+The sign in the original scoring implementation was corrected before the reported model-selection result was obtained. The correction changes the FZ scores and model selection, but **does not change the underlying VaR, ES or breach counts**.
+
+---
+
+## 9. Interpretation of the results
+
+The project produces three separate findings.
+
+### Finding 1 — Tail dependence is scale-dependent in the selected sample
+
+The D1 and D5 lower-tail estimates differ, and the reported bootstrap interval for D5 − D1 excludes zero.
+
+This is evidence of **timescale-specific downside co-movement in this sample**.
+
+It is not evidence of a universal monotonic horizon law.
+
+### Finding 2 — Detecting multiscale dependence is easier than forecasting with it
+
+M2 and M3 change the risk distribution substantially, but their 99% VaR thresholds are too close to zero and consequently understate the frequency of realized losses.
+
+M3 is directionally better than M2, but the improvement is not enough for operational use.
+
+### Finding 3 — The benchmark remains the safest operational choice for this tested setting
+
+M0 passes the reported calibration diagnostics and has the lowest corrected FZ0 loss among eligible models.
+
+Therefore the practical recommendation is:
+
+> **Use M0 historical simulation as the primary operational risk-monitoring baseline for this tested portfolio. Use the multiscale framework as a dependence/stress diagnostic until its forecasting calibration is improved and revalidated.**
+
+This is deliberately a conservative conclusion: a more sophisticated model is not accepted merely because it is more sophisticated.
+
+---
+
+## 10. Stress analysis
+
+A separate 2020 stress comparison is included as a **descriptive diagnostic**.
+
+Marginal transformations are fitted on 2015–2019 and carried into the 2020 stress period. Because the wavelet components use data through the stress period, this analysis is not a sequence of real-time forecasts.
+
+The observed lower-tail co-movement rises across scales during the stress period, with the largest descriptive increase at S5.
+
+These results should not be interpreted as pure copula-dependence changes because stress-period PIT probabilities are based on pre-stress marginal transformations.
+
+---
+
+## 11. Robustness
+
+The D5 − D1 dependence difference remains negative across the tested specifications, but its reported interval changes with sample and bootstrap settings.
+
+The baseline and Monte Carlo cases include zero, while some threshold/window/seed variants exclude zero.
+
+This means the dependence result should be treated as **evidence in the selected sample, not a universal law**.
+
+A block bootstrap and common-sample analysis would provide stronger time-series inference.
+
+---
+
+## 12. Limitations and audit status
+
+This project intentionally separates what is supported by the saved evidence from what still requires a clean regenerated run.
+
+### Important implementation limitations
+
+- Conditional means and volatilities are frozen between 21-day refits.
+- The AR mean-parameter lookup required correction to account for the parameter labels emitted by `arch` (for example `Const` and `y[1]`).
+- Copula fallback decisions should be logged explicitly rather than silently suppressed.
+- The bootstrap used for the main tail-dependence intervals resamples time rows independently and therefore does not fully capture serial dependence or estimation uncertainty.
+- Wavelet boundary handling and scenario reconstruction can affect forecast dispersion.
+- Library versions should be pinned for exact byte-for-byte reproduction.
+
+### What has been independently checked
+
+The audit of the archived evidence checked:
+
+- date alignment;
+- realized returns against the cached weighted return series;
+- the four breach counts;
+- coverage and independence statistics;
+- reconstruction of the M0 forecasts;
+- corrected FZ0 rescoring;
+- aggregate tail-dependence point estimates against the saved pairwise event counts.
+
+The full M1–M3 fits and bootstrap intervals in the archived evidence were not independently regenerated in the audit environment. Therefore the current report should be understood as a **validated analysis of the saved run**, not as proof that a fresh environment will reproduce every archived M1–M3 number bit-for-bit without rerunning the model.
+
+Do not silently replace archived numbers with a newly generated run: record the new configuration and compare it explicitly.
+
+---
+
+## 13. Reproducibility
+
+### Install
 
 ```bash
-git clone https://github.com/imaadh-ifthi/saifa_tiramisu.git
+git clone <repository-url>
 cd saifa_tiramisu
+python -m venv .venv
+
+# Windows
+.venv\\Scripts\\activate
+
+# Linux / macOS
+source .venv/bin/activate
+
 pip install -r requirements.txt
 ```
 
-| Command | Purpose |
-| :-- | :-- |
-| `python main.py --quick` | Smoke test (750-day window, 60 test days, 3 scales, 1,000 draws) |
-| `python main.py` | **Archived configuration:** all out-of-sample days (1,764), 5 scales, 2,000 draws; also runs the horizon analysis and robustness suite |
-| `python main.py --full` | 10,000 draws. **Not** the archived configuration |
-| `python main.py --refresh` | Re-downloads data; may change the data snapshot |
+### Run a smoke test
 
-The default run uses the included return cache in `data/portfolio_returns.csv`. Each run deletes known generated artifacts first and writes `results/run_manifest.json` (data hash, date range, parameters). A `tests/` folder (wavelet decomposition, cross-scale coupling, tail dependence, lower-tail PIT, ablation, final validation) is included; run with `pytest tests/` after installing `pytest`.
+```bash
+python main.py --quick
+```
+
+### Run the configured experiment
+
+```bash
+python main.py
+```
+
+This uses the repository's configured data cache and default experimental settings.
+
+### Optional controls
+
+```bash
+python main.py --test-days 100
+python main.py --simulations 1000
+python main.py --refit-every 21
+python main.py --train-window 1000
+python main.py --refresh
+```
+
+`--refresh` downloads a fresh Yahoo Finance snapshot and may therefore produce a different data hash or numerical result from the archived run.
+
+`--full` increases the Monte Carlo workload and is **not** the archived competition configuration.
+
+### Tests
+
+```bash
+pytest tests/
+```
+
+The tests cover wavelet reconstruction, cross-scale coupling, tail dependence, lower-tail PIT behaviour, model ablation and final validation logic.
+
+### Outputs
+
+The main pipeline writes generated artefacts under `results/`, including:
+
+```text
+results/
+├── final_validation_summary.csv
+├── final_competition_comparison.csv
+├── model_comparison.csv
+├── tail_dependence_scale_comparison.csv
+├── robustness_summary.csv
+├── final_oos_var_comparison.png
+├── final_breach_calibration.png
+├── final_es_comparison.png
+├── tail_dependence_by_horizon_ci.png
+└── run_manifest.json
+```
+
+The run manifest records experiment parameters and data information so that a result can be traced back to its configuration.
 
 ---
 
-## CLI Reference
-
-| Argument | Type | Default | Description |
-| :-- | :-- | :-- | :-- |
-| `--quick` | flag | off | Smoke test settings |
-| `--full` | flag | off | 5 scales, all OOS days, 10,000 draws |
-| `--levels` | int | `5` | Number of wavelet detail scales |
-| `--test-days` | int | all days | Limit OOS days |
-| `--simulations` | int | `2000` | Monte Carlo draws per forecast |
-| `--refit-every` | int | `21` | Refit frequency (trading days) |
-| `--train-window` | int | `1000` | Trailing training window |
-| `--refresh` | flag | off | Force data re-download |
-
----
-
-## Project Directory Layout
+## 14. Project structure
 
 ```text
 saifa_tiramisu/
-├── main.py                 # Entry point: validation, backtest, report, robustness
-├── config.py               # Configuration
+├── main.py
+├── config.py
 ├── requirements.txt
 ├── README.md
 ├── src/
-│   ├── data.py             # Yahoo Finance loader with CSV cache
-│   ├── modwt.py            # Normalized SWT-based additive decomposition
-│   ├── marginals.py        # AR(1)-GARCH(1,1) + EVT, PIT / inverse PIT
-│   ├── copulas.py          # Vine copula with Gaussian fallback
-│   ├── cross_scale.py      # Cross-scale Gaussian coupler
-│   ├── models.py           # M0 historical sim, M1 heavy-tail, wavelet-vine (M2/M3)
-│   ├── tail_dependence.py  # Empirical tail dependence, bootstrap, FDR, stress
-│   ├── robustness.py       # Robustness cases
-│   ├── risk.py             # VaR and ES
-│   ├── backtests.py        # Kupiec, Christoffersen, FZ0, Diebold-Mariano
-│   ├── backtest.py         # Rolling out-of-sample loop (M0-M3)
-│   ├── report.py           # Summaries and figures
+│   ├── data.py
+│   ├── modwt.py
+│   ├── marginals.py
+│   ├── copulas.py
+│   ├── cross_scale.py
+│   ├── models.py
+│   ├── tail_dependence.py
+│   ├── robustness.py
+│   ├── risk.py
+│   ├── backtests.py
+│   ├── backtest.py
+│   ├── report.py
 │   └── utils.py
 ├── tests/
-├── data/                   # Cached portfolio_returns.csv
-└── results/                # Generated outputs (CSVs, figures, run_manifest.json)
+├── data/
+└── results/
 ```
 
-`recover.py` and `scratch_test.py` are development scripts; remove them before final submission if not needed.
+### Module map
+
+| File | Purpose |
+|---|---|
+| `data.py` | Yahoo Finance loading and cached return preparation |
+| `modwt.py` | normalized SWT/MODWT-equivalent decomposition |
+| `marginals.py` | AR-GARCH/EVT marginals, PIT and inverse PIT |
+| `copulas.py` | within-scale R-vine / Gaussian fallback |
+| `cross_scale.py` | M3 cross-scale Gaussian stress-rank coupling |
+| `models.py` | M0–M3 model implementations |
+| `tail_dependence.py` | empirical tail dependence, bootstrap, FDR and stress analysis |
+| `backtest.py` | rolling out-of-sample model loop |
+| `backtests.py` | coverage, independence and FZ0 scoring |
+| `report.py` | result tables and figures |
 
 ---
 
-## AI Disclosure
+## 15. Practical recommendation
 
-AI tools assisted with learning, report drafting, code review, debugging and evidence checks. The review identified the scoring-sign error and helped implement regression checks. The team remains responsible for the final code, assumptions, calculations and interpretation, and must be able to explain or modify the work live as required by the competition.
+For the tested portfolio and evaluation period:
+
+**Tomorrow's action for a risk manager:**
+
+> Keep the historical-simulation VaR/ES process as the operational baseline. Use the multiscale model to identify potential changes in dependence and diversification, but do not use its current forecasts to reduce risk limits.
+
+Before promoting M2 or M3 to an operational role, regenerate the complete out-of-sample experiment after the implementation fixes, verify the actual copula backend used, update conditional states between refits, and require the richer models to demonstrate calibrated performance on unseen data.
+
+---
+
+## 16. AI disclosure
+
+AI tools were used for learning, report drafting, code review, debugging and evidence checks. AI-assisted review identified the FZ0 scoring-sign issue and helped develop regression checks.
+
+The team remains responsible for the final code, assumptions, calculations, interpretation and any changes made to the submitted repository, and must be able to explain and modify the work during judging.
+
+---
+
+## 17. Final takeaway
+
+This project does **not** assume that complexity wins.
+
+It asks a more useful question:
+
+> **Does the extra information about tails and timescales improve real-world risk measurement?**
+
+Our current evidence says:
+
+- tail dependence differs across selected wavelet scales;
+- cross-scale coupling changes the forecast distribution;
+- the current M2/M3 implementation is not yet calibrated well enough for operational 99% VaR;
+- the simple benchmark remains the safest operational choice for this experiment.
+
+That separation between **detecting a phenomenon** and **proving that a model can exploit it reliably** is the central lesson of the study.
