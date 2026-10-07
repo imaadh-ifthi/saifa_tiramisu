@@ -4,334 +4,297 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Challenge: SAIFA Quant Edge 1.0](https://img.shields.io/badge/SAIFA-Quant%20Edge%201.0-green.svg)](https://saifa.org)
 
-An end-to-end quantitative risk management engine combining **Additive Multiresolution Wavelet Decomposition (MODWT)**, **AR(1)-GARCH(1,1) Volatility Filtering**, **Extreme Value Theory (EVT) Generalized Pareto Tail Splicing**, and **Regular Vine Copulas (R-Vines)** to investigate and quantify multiscale tail dependence across heterogeneous asset classes.
+A study of whether joint downside behaviour differs across wavelet timescales, and whether a richer dependence model improves daily portfolio VaR / ES forecasts. It combines **normalized stationary wavelet (SWT/MODWT-equivalent) decomposition**, **AR(1)-GARCH(1,1) filtering**, **EVT generalized Pareto tails**, **regular vine copulas** (Gaussian fallback) and a **cross-scale Gaussian coupler**.
+
+> **Status of this document.** It follows the project report ("Revised report draft"). The report's scoring was **corrected from saved forecasts** and the full refit of M1-M3 has **not** been independently regenerated. See [Known Issues & Reproducibility Status](#known-issues--reproducibility-status) before relying on any generated file in `results/`.
 
 ---
 
 ## Table of Contents
 
-1. [Core Research Question](#core-research-question)
-2. [Executive Summary & Key Findings](#executive-summary--key-findings)
-3. [System Architecture](#system-architecture)
-4. [Methodology & Mathematical Formulation](#methodology--mathematical-formulation)
-   - [1. Multiscale Return Decomposition (MODWT)](#1-multiscale-return-decomposition-modwt)
-   - [2. Marginal Filtration & EVT Tail Splicing](#2-marginal-filtration--evt-tail-splicing)
-   - [3. Dependence Structure (Regular Vine Copulas)](#3-dependence-structure-regular-vine-copulas)
-   - [4. Monte Carlo Multiscale Reconstruction & Risk Metrics](#4-monte-carlo-multiscale-reconstruction--risk-metrics)
-   - [5. Statistical Validation & Backtesting Suite](#5-statistical-validation--backtesting-suite)
-5. [Key Design Decisions & Rationale](#key-design-decisions--rationale)
-6. [Portfolio Universe](#portfolio-universe)
-7. [Installation & Reproduction](#installation--reproduction)
-8. [CLI Reference](#cli-reference)
-9. [Project Directory Layout](#project-directory-layout)
-10. [Concrete Risk Manager Recommendations](#concrete-risk-manager-recommendations)
-11. [AI Disclosure](#ai-disclosure)
+1. [Research Question](#research-question)
+2. [Executive Summary](#executive-summary)
+3. [Portfolio and Experimental Design](#portfolio-and-experimental-design)
+4. [Models Compared](#models-compared)
+5. [Methodology](#methodology)
+6. [Results](#results)
+7. [Recommendation](#recommendation)
+8. [Known Issues & Reproducibility Status](#known-issues--reproducibility-status)
+9. [Installation & Usage](#installation--usage)
+10. [CLI Reference](#cli-reference)
+11. [Project Directory Layout](#project-directory-layout)
+12. [AI Disclosure](#ai-disclosure)
 
 ---
 
-## Core Research Question
+## Research Question
 
-> **Does cross-asset tail dependence change with investment horizon, and what is the economic cost of ignoring multiscale dependence in institutional portfolio risk measurement?**
+> **Does tail dependence change with investment horizon, and what does ignoring it do to measured risk?**
 
-Standard risk models (e.g., RiskMetrics, static Gaussian copulas, aggregate Historical Simulation) estimate correlation and tail risk directly on aggregate daily returns. This imposes two flawed assumptions:
-1. **Timescale Invariance**: Dependence dynamics are assumed identical whether holding assets for 1 day, 1 week, or 1 month.
-2. **Elliptical Tail Symmetry**: Extreme joint downside crashes are modeled with the same dependence as benign co-movements or joint rallies.
-
-This framework decomposes asset returns into distinct frequency bands (investment horizons) and models joint tail dependence dynamically at each scale.
+Wavelet scales are frequency bands *within daily returns*. They are not direct estimates of multi-day holding-period VaR. The model comparisons test the present architecture rather than isolating a universal causal effect of ignoring horizon dependence.
 
 ---
 
-## Executive Summary & Key Findings
+## Executive Summary
 
-- **Tail Risk Underestimation**: An aggregate Gaussian copula benchmark severely underestimates 99% Expected Shortfall (ES) by **over 160%** during market stress regimes (predicting ~2.7% expected tail loss when realized tail risk exceeds ~7.1%).
-- **VaR Unconditional Coverage**: In rolling out-of-sample backtesting, the multiscale wavelet-vine model achieves nominal 99% VaR coverage (Kupiec LR test $p = 0.6357$, failing to reject correctness), whereas the aggregate benchmark is strongly rejected ($p = 0.0004$) due to excessive violations (8.33% violation rate vs. 1% target).
-- **FZ Elicitability**: Under the strictly consistent Fissler-Ziegel (FZ0) joint VaR/ES scoring function, the multiscale framework achieves superior loss performance relative to the aggregate benchmark.
+- **Dependence differs between endpoint scales, but not monotonically.** In the 2015-2019 analysis sample, the mean finite-threshold lower-tail coefficient (q = 0.05) is **0.0701 at D1** and **0.0334 at D5**. The paired D5 − D1 difference is **−0.0366** with an ordinary bootstrap 95% interval **[−0.0685, −0.0080]**. D4 has the highest coefficient, so there is no steady decline with scale. The result is sensitive to sample and bootstrap assumptions, and the BH-adjusted p-value for D5 is exactly 0.05 (borderline). No individual asset-pair difference survives FDR correction.
+- **The multiscale forecasts under-cover realized losses.** Across 1,764 out-of-sample days (2018-12-24 to 2025-12-30), M2 and M3 breach their 99% VaR on **7.71%** and **7.20%** of days (target 1%). Both fail the coverage and independence diagnostics.
+- **M0 and M1 are not rejected** by those diagnostics (breach rates 1.19% and 1.36%). A non-rejection is not proof of correct calibration.
+- **Corrected scoring selects M0.** The repository's original FZ0 implementation had a sign error. After correcting it, the implemented selection rule prefers **M0 (historical simulation)** over M1: corrected mean FZ0 **−2.8080 (M0)** vs **−2.7862 (M1)**. The gap (about 0.022) is small and untested, so it is **not** evidence of statistically significant superiority.
+- **Recommendation:** keep historical simulation as the operational baseline for this tested setting (M1 as comparator) and use multiscale analysis as a **diagnostic**, not to justify reduced risk limits.
 
 ---
 
-## System Architecture
+## Portfolio and Experimental Design
 
-```mermaid
-flowchart TD
-    A[Yahoo Finance Data Engine] -->|Daily Log Returns| B[Data Cleaning & Calendar Alignment]
-    B --> C[Additive MODWT Multiresolution Filter]
-    
-    subgraph Wavelet Decomposition
-        C --> D1[Scale D1: 1-2 Days]
-        C --> D2[Scale D2: 2-4 Days]
-        C --> D3[Scale D3: 4-8 Days]
-        C --> D4[Scale D4: 8-16 Days]
-        C --> D5[Scale D5: 16-32 Days]
-        C --> SJ[Scale S5: Trend > 32 Days]
-    end
+### Portfolio and data
 
-    subgraph Scale-Specific Marginal Filtration
-        D1 & D2 & D3 & D4 & D5 & SJ --> E1[AR 1 - GARCH 1,1 Filter]
-        E1 --> E2[Standardized Residuals z_t]
-        E2 --> E3[EVT Peaks-Over-Threshold: GPD Lower/Upper Tails]
-        E3 --> E4[Probability Integral Transform: Uniforms U]
-    end
+Equal-weighted (20% each) return proxy for five liquid instruments:
 
-    subgraph Dependence Engine
-        E4 --> F1[Regular Vine Copula Decomposition]
-        F1 -->|Fallback if unavailable| F2[Regularized Gaussian Copula]
-        F1 --> F3[Tail Dependence Diagnostic: lambda_L, lambda_U]
-    end
+| Instrument | Exposure | Weight |
+| :-- | :-- | :-- |
+| SPY | US equity ETF | 20% |
+| IEF | US Treasury 7-10 year ETF | 20% |
+| GLD | Gold ETF | 20% |
+| USO | Oil futures exposure through an ETF | 20% |
+| BTC-USD | Bitcoin against the US dollar | 20% |
 
-    subgraph Risk Forecasting & Reconstruction
-        F1 & F2 --> G1[Monte Carlo Copula Simulation: N_SIM Draws]
-        G1 --> G2[Inverse PIT via GPD / Empirical Quantiles]
-        G2 --> G3[Conditional Mean & Volatility Restoration]
-        G3 --> G4[Exact Additive Multiscale Return Synthesis]
-        G4 --> G5[Portfolio Return Distribution @ Weights]
-        G5 --> G6[Forecasted 99% VaR & 99% Expected Shortfall]
-    end
+These instruments provide contrasting equity, bond, commodity and cryptocurrency exposures. Equal weights keep the comparison transparent and avoid fitting weights to the evaluation sample. The 2015-2025 period provides a long common history and includes the 2020 market shock.
 
-    subgraph Out-of-Sample Backtesting & Diagnostics
-        G6 --> H1[Kupiec Proportion of Failures Test]
-        G6 --> H2[Christoffersen Independence Markov Test]
-        G6 --> H3[Fissler-Ziegel FZ0 Joint VaR/ES Loss]
-        G6 --> H4[Diebold-Mariano Predictive Accuracy Test]
-        H1 & H2 & H3 & H4 --> I[Executive Summary, CSVs & Figures]
-    end
+**Data handling.** Yahoo Finance via `yfinance`, adjusted prices. SPY defines the calendar; prices are forward-filled for at most five rows; incomplete rows are dropped. Asset log returns are ln(P_t / P_{t-1}). The portfolio proxy is the **weighted sum of asset log returns**, which approximates, but is not exactly, the log return of a rebalanced portfolio. Bitcoin returns across stock-market closures span those calendar gaps. USO is a fund proxy with futures-roll effects, not a spot-oil investment.
+
+### Evaluation settings
+
+| Setting | Value |
+| :-- | :-- |
+| Aligned sample | 5 Jan 2015 to 30 Dec 2025; 2,764 rows |
+| Forecast evaluation | 24 Dec 2018 to 30 Dec 2025; 1,764 dates |
+| Training and refit | Trailing 1,000 rows; refit every 21 trading days |
+| Risk and simulation | Lower-tail α = 0.01; 2,000 draws per model and forecast |
+| Tails and seed | EVT tails beyond the 5th and 95th percentiles; seed 42 |
+
+---
+
+## Models Compared
+
+| ID | Specification |
+| :-- | :-- |
+| **M0** | Historical simulation of the weighted return proxy |
+| **M1** | AR-GARCH/EVT marginals and an attempted five-asset vine copula on raw returns (no wavelets) |
+| **M2** | Wavelet components, scale-specific marginals and within-scale copulas (**no** cross-scale coupling) |
+| **M3** | M2 plus Gaussian stress-rank coupling across scales |
+
+M2 vs M3 isolates cross-scale coupling. M1 vs M2 differs in decomposition, marginals and reconstruction as well as dependence, so it does **not** isolate the effect of ignoring horizon dependence.
+
+---
+
+## Methodology
+
+### 1. Wavelet components
+
+`pywt.swt` with `db4`, 5 levels, `norm=True`, `trim_approx=True`; each detail and the smooth component is reconstructed separately with `iswt`:
+
+```
+r_t = D1_t + D2_t + D3_t + D4_t + D5_t + S5_t
 ```
 
----
+Approximate bands: D1 1-2 d, D2 2-4 d, D3 4-8 d, D4 8-16 d, D5 16-32 d, S5 > 32 d. Inputs get 250 observations of **symmetric padding** on each side (plus right padding to a multiple of 32); components are cropped back to the original length. This reduces periodic wrap-around, but reflected boundary observations remain an approximation. Exact reconstruction of the training series does not establish correct out-of-sample reconstruction or equivalence of scales to investment holding periods.
 
-## Methodology & Mathematical Formulation
+### 2. Marginals
 
-### 1. Multiscale Return Decomposition (MODWT)
+Each raw return series (M1) or reconstructed component (M2/M3) is fitted with **AR(1)-GARCH(1,1)** (Gaussian likelihood, EWMA λ = 0.94 fallback if the fit fails). Standardized residuals have an empirical centre and **generalized Pareto tails** beyond the 5th/95th percentiles. Stability choices: residuals clipped to [−15, 15], GPD shape to [−0.49, 0.49]. The PIT is applied to the fitted standardized residuals, consistent with the EVT fitting sample. Simulation inverts the fitted residual distribution and restores the stored forecast mean and volatility.
 
-To separate market behavior across institutional trading horizons (high-frequency noise, medium-frequency rebalancing, and low-frequency macroeconomic trends), daily asset log returns $r_{i,t} = \ln(P_{i,t}/P_{i,t-1})$ are decomposed using an additive multiresolution scheme inspired by the Maximal Overlap Discrete Wavelet Transform (MODWT):
+### 3. Dependence and simulation
 
-$$r_{i,t} = \sum_{j=1}^{J} D_{j,i,t} + S_{J,i,t}$$
+- **Within a scale:** an R-vine fit with BIC controls is attempted via `pyvinecopulib`, with a regularized Gaussian copula fallback. Exceptions are suppressed and the run manifest does not record which backend was used, so **no claim is made that every archived fit used an R-vine or BIC selection.**
+- **Across scales (M3):** each scale's PIT vector is summarized as a mean normal-score stress score; a Gaussian copula is fitted on the six scalar stress scores, and simulated scale rows are paired by rank while preserving within-scale scenarios. Summed components are weighted to form the portfolio proxy.
 
-where:
-- $D_{j,i,t}$ represents the detail component at octave scale $j \in \{1, \dots, J\}$, corresponding to oscillations within frequencies $[\frac{1}{2^{j+1}}, \frac{1}{2^j}]$ (in trading days: $D_1 \approx 1\text{--}2\text{d}$, $D_2 \approx 2\text{--}4\text{d}$, $D_3 \approx 4\text{--}8\text{d}$, $D_4 \approx 8\text{--}16\text{d}$, $D_5 \approx 16\text{--}32\text{d}$).
-- $S_{J,i,t}$ is the smooth residual component capturing trend dynamics with periods $> 2^J$ trading days ($> 32\text{d}$).
-- **Daubechies 4 (`db4`) Wavelet**: Employs compact 8-tap filter banks providing 2 vanishing moments, balancing time-domain localization with smooth frequency bandpass separation.
-- **Reflection Boundary Condition**: Standard periodic boundary convolution introduces forward-looking leakage from the far left of the series into the forecast boundary. We employ symmetric edge reflection to minimize boundary artifact distortion during rolling out-of-sample execution.
+### 4. Tail-dependence estimator
 
-### 2. Marginal Filtration & EVT Tail Splicing
+For an asset pair and threshold q:
 
-Each scale component $X_{j,i}$ is modeled via a two-stage semi-parametric approach:
+```
+lambda_L(q) = count(U_i < q and U_j < q) / (n * q)
+```
 
-#### Stage A: AR(1)-GARCH(1,1) Dynamic Volatility Filter
-The conditional mean and variance of component $y_t = X_{j,i,t} \cdot c$ are filtered as:
+Primary q = 0.05 (sensitivity: 0.025 and 0.10). Under independent uniform PITs the reference value is q. These are **finite-threshold** coefficients, not limits as q → 0. The headline value is the mean of the ten pairwise coefficients. The bootstrap resamples time rows independently with 2,000 resamples, holds fitted transformations fixed, and uses paired resampling for scale-vs-D1 differences with Benjamini-Hochberg FDR correction. It ignores serial dependence, model-estimation uncertainty and boundary effects, so intervals should be treated as **exploratory**.
 
-$$y_t = \mu + \phi (y_{t-1} - \mu) + \varepsilon_t, \quad \varepsilon_t = \sigma_t z_t, \quad z_t \overset{\text{iid}}{\sim} (0, 1)$$
+### 5. Forecast timing (what is updated between refits)
 
-$$\sigma_t^2 = \omega + \alpha \varepsilon_{t-1}^2 + \beta \sigma_{t-1}^2$$
+Every fitted window ends before its forecast origin and the wavelet decomposition occurs inside that window, so no post-origin observations enter a fit. However means and volatilities are stored at the refit date and **not updated on intervening days**: new simulation seeds are used daily, but distributions stay frozen for up to 21 trading days. These are dated out-of-sample forecasts under a periodic-refit design, not fully updated daily conditional GARCH forecasts.
 
-Stationarity is strictly enforced ($\alpha \ge 0, \beta \ge 0, \alpha + \beta < 1$). If numerical convergence fails due to near-zero scale variance, an exponential weighted moving average (EWMA, $\lambda = 0.94$) volatility filter serves as a deterministic fallback.
+### 6. Risk measures and validation
 
-#### Stage B: Extreme Value Theory (EVT) Peaks-Over-Threshold (POT)
-Standardized residuals $z_t$ exhibit excess kurtosis and asymmetric fat tails. According to the Pickands–Balkema–de Haan theorem, excess losses beyond high thresholds follow a Generalized Pareto Distribution (GPD).
+- VaR is the 1st percentile of the simulated return distribution; ES is the mean at or below it. Negative values are losses. A breach is a realized return below the forecast VaR. A calibrated 99% threshold gives about 17.64 breaches in 1,764 days.
+- **Kupiec** unconditional coverage and **Christoffersen** independence tests.
+- **Fissler-Ziegel FZ0 joint VaR/ES loss** (lower is better), with ES e < 0:
 
-We define lower threshold $u_L$ (e.g., 5th percentile) and upper threshold $u_R$ (95th percentile). The cumulative distribution function $F(z)$ is spliced into three regimes:
+```
+L_FZ0(y, v, e) = - I(y <= v) * (v - y) / (alpha * e) + v / e + ln(-e) - 1
+```
 
-$$F(z) = \begin{cases}
-p_L \cdot \left[1 + \xi_L \frac{u_L - z}{\beta_L}\right]^{-1/\xi_L}, & z < u_L \quad (\text{Lower Tail}) \\
-p_L + (p_R - p_L) \cdot F_{\text{emp}}(z), & u_L \le z \le u_R \quad (\text{Interior Empirical CDF}) \\
-p_R + (1 - p_R) \cdot \left[1 - \left(1 + \xi_R \frac{z - u_R}{\beta_R}\right)^{-1/\xi_R}\right], & z > u_R \quad (\text{Upper Tail})
-\end{cases}$$
+> The **original repository code used a positive sign on the first term** (`src/backtests.py`, `term1`), which made larger breaches *reduce* the loss and invalidated the earlier scores and the M1 recommendation derived from them. See [Known Issues](#known-issues--reproducibility-status).
 
-Applying the **Probability Integral Transform (PIT)** yields i.i.d. uniform margins:
-
-$$U_{j,i,t} = F_{j,i}(z_{j,i,t}) \sim \mathcal{U}(0, 1)$$
-
-### 3. Dependence Structure (Regular Vine Copulas)
-
-By Sklar's Theorem, the joint distribution of uniform margins $\mathbf{U} = (U_1, \dots, U_d)$ at scale $j$ is uniquely characterized by a copula $C$:
-
-$$F(\mathbf{x}) = C(F_1(x_1), \dots, F_d(x_d))$$
-
-High-dimensional joint distributions often exhibit complex non-Gaussian conditional dependencies. We decompose $C$ into a tree hierarchy of bivariate copulas using **Regular Vine Copulas (R-Vines)**:
-
-$$f(u_1, \dots, u_d) = \prod_{k=1}^{d-1} \prod_{i=1}^{d-k} c_{i, i+k | i+1, \dots, i+k-1} \left( F(u_i | \cdot), F(u_{i+k} | \cdot) \right)$$
-
-- Bivariate pair families (Gaussian, Student-$t$, Clayton, Gumbel, Frank, BB1, BB8, etc.) and tree structures are selected automatically using the Bayesian Information Criterion (BIC) via `pyvinecopulib`.
-- **Tail Dependence Diagnostics**: Average pairwise lower and upper tail dependence coefficients are computed numerically via:
-
-$$\lambda_L = \lim_{q \to 0^+} \frac{P(U_i \le q, U_j \le q)}{q}, \quad \lambda_U = \lim_{q \to 1^-} \frac{P(U_i > q, U_j > q)}{1 - q}$$
-
-- **Fallback**: If `pyvinecopulib` is unavailable, the model gracefully falls back to a regularized Gaussian copula with positive-definite eigenvalue clipping.
-
-### 4. Monte Carlo Multiscale Reconstruction & Risk Metrics
-
-To obtain one-step-ahead forecasts for day $t+1$:
-1. For each scale $j \in \{1, \dots, J, S_J\}$, simulate $M = N_{\text{sim}}$ uniform vectors $\mathbf{U}_j^{(m)} \sim C_j$.
-2. Invert each margin to standardized residual innovations: $z_{j,i}^{(m)} = F_{j,i}^{-1}(U_{j,i}^{(m)})$.
-3. Restore scale and conditional volatility:
-   $$\hat{X}_{j,i,t+1}^{(m)} = \hat{\mu}_{j,i,t+1} + \hat{\sigma}_{j,i,t+1} \cdot z_{j,i}^{(m)}$$
-4. Reconstruct simulated asset returns by summing across all scales:
-   $$\hat{r}_{i,t+1}^{(m)} = \sum_{j=1}^J \hat{X}_{j,i,t+1}^{(m)} + \hat{S}_{J,i,t+1}^{(m)}$$
-5. Aggregate across portfolio weights $\mathbf{w}$:
-   $$\hat{R}_p^{(m)} = \sum_{i=1}^d w_i \hat{r}_{i,t+1}^{(m)}$$
-6. Compute risk measures at significance level $\alpha = 0.01$ (99% confidence):
-   $$\text{VaR}_\alpha = Q_\alpha(\hat{R}_p), \quad \text{ES}_\alpha = \mathbb{E}\left[\hat{R}_p \mid \hat{R}_p \le \text{VaR}_\alpha\right]$$
-
-### 5. Statistical Validation & Backtesting Suite
-
-#### A. Kupiec Proportion of Failures (POF) Test
-Evaluates whether the empirical violation rate $\hat{\pi} = \frac{x}{T}$ equals the nominal rate $\alpha = 0.01$:
-
-$$LR_{\text{POF}} = -2 \ln \left[ \frac{(1-\alpha)^{T-x} \alpha^x}{(1-\hat{\pi})^{T-x} \hat{\pi}^x} \right] \sim \chi^2(1)$$
-
-#### B. Christoffersen Independence Test
-Evaluates whether VaR violations are independent over time or clustered in volatility bursts using a first-order Markov chain transition matrix $[\pi_{00}, \pi_{01}; \pi_{10}, \pi_{11}]$:
-
-$$LR_{\text{ind}} = -2 \ln \left[ \frac{L(\hat{\Pi}_0)}{L(\hat{\Pi}_1)} \right] \sim \chi^2(1)$$
-
-#### C. Fissler-Ziegel (FZ0) Joint VaR/ES Scoring Function
-Expected Shortfall alone is **not elicitable** (cannot be backtested via a standalone scoring function). However, Fissler & Ziegel (2016) proved that the joint vector $(\text{VaR}_\alpha, \text{ES}_\alpha) = (v, e)$ is jointly elicitable under the strictly consistent FZ0 loss:
-
-$$L_{\text{FZ0}}(y, v, e; \alpha) = \frac{\mathbb{I}(y \le v)}{\alpha e} (v - y) + \frac{v}{e} + \ln(-e) - 1$$
-
-where losses are negative ($v < 0, e < 0$). Lower loss indicates superior joint predictive calibration.
-
-#### D. Diebold-Mariano Predictive Accuracy Test
-Tests the null hypothesis of equal predictive accuracy between the multiscale model loss $L_1$ and the benchmark loss $L_2$ ($d_t = L_{1,t} - L_{2,t}$):
-
-$$DM = \frac{\bar{d}}{\sqrt{\hat{\sigma}_d^2 / T}} \overset{d}{\to} \mathcal{N}(0, 1)$$
+- **Selection rule:** a model is eligible only if both the Kupiec and Christoffersen p-values are ≥ 0.05; among eligible models, the lowest (corrected) FZ0 loss is preferred.
 
 ---
 
-## Key Design Decisions & Rationale
+## Results
 
-| Decision | Alternative Considered | Rationale & Justification |
-| :--- | :--- | :--- |
-| **Additive MODWT** | Standard Decimated DWT | Decimated DWT is non-redundant and downsamples by $2^j$, which disrupts continuous daily time-index alignment and creates shift-variance. Additive MODWT maintains full original sample length at all scales and provides exact linear reconstruction: $\sum D_j + S_J = X$. |
-| **Reflection Boundary Handling** | Periodic / Zero Padding | Periodic padding assumes returns wrap around circularly, causing severe boundary distortion and forward-looking contamination when applied to rolling out-of-sample windows. Reflection minimizes artificial discontinuity at the boundary. |
-| **AR-GARCH + EVT Splicing** | Parametric Student-$t$ | A global Student-$t$ distribution forces identical degrees of freedom across the entire domain. Splicing empirical interior distributions with independent GPD tails allows asymmetric upper vs. lower tail behavior without compromising central calibration. |
-| **Regular Vine Copulas** | Multi-Gaussian / Multivariate-$t$ | Multivariate elliptical copulas force radial symmetry and identical tail dependence across all asset pairs. R-Vines construct high-dimensional distributions from flexible bivariate building blocks, capturing complex cross-asset asymmetric crash dependency. |
-| **Dynamic Yahoo Download with Caching** | Hardcoded Static CSV | Keeps the submission repository lightweight (< 25 MB) to satisfy challenge constraints, while caching the dataset locally on first run to ensure offline reproducibility. |
-| **Fallback Gaussian Engine** | Strict failure on missing C++ libs | `pyvinecopulib` requires platform-specific C++ binaries. A regularized normal-score Gaussian copula fallback guarantees portability and zero crash risk across diverse judging environments. |
+### Out-of-sample VaR validation (1,764 days)
+
+| Model | Breaches | Rate | Mean VaR | Coverage p | Independence p |
+| :-- | :-- | :-- | :-- | :-- | :-- |
+| M0 | 21 | 1.19% | −3.17% | 0.435 | 0.249 |
+| M1 | 24 | 1.36% | −2.94% | 0.149 | 0.416 |
+| M2 | 136 | 7.71% | −1.39% | 4.23e-73 | 0.00155 |
+| M3 | 127 | 7.20% | −1.46% | 5.85e-65 | 0.00448 |
+
+Neither test rejects M0 or M1 at 5%; M2 and M3 fail both because their VaR thresholds lie too close to zero. Cross-scale coupling lowers the breach rate from 7.71% (M2) to 7.20% (M3), about 0.51 percentage points. Whether that improvement is statistically significant has not been tested, and M3 still breaches about seven times the nominal frequency.
+
+### Expected Shortfall and corrected FZ0
+
+| Model | Mean ES | Original score (sign bug) | Corrected FZ0 | Eligible |
+| :-- | :-- | :-- | :-- | :-- |
+| M0 | −5.36% | −3.8875 | **−2.8080** | Yes |
+| M1 | −3.85% | −4.2653 | −2.7862 | Yes |
+| M2 | −1.61% | −9.4896 | 0.8775 | No |
+| M3 | −1.70% | −8.8381 | 0.3344 | No |
+
+M0 has the lowest corrected loss among eligible models, so the rule selects **M0**. The small-magnitude ES of M2/M3 does **not** indicate lower risk: it accompanies severe VaR under-coverage and worse corrected scores. Average ES over all dates is not comparable to average loss on breach dates, which condition on different observations.
+
+> The "corrected" values were obtained by rescoring the same saved forecasts per the report. The files currently in `results/` may still show the original scores until the pipeline is re-run with the sign fix applied.
+
+### Tail dependence by scale (lower tail, q = 0.05, 2015-2019 sample)
+
+The multiscale model is fitted on 1,257 observations; the saved pairwise table has 1,256 aligned PIT rows. Independence reference = 0.05.
+
+| Scale | Mean λ_L | 95% interval | Difference from D1 |
+| :-- | :-- | :-- | :-- |
+| D1 | 0.0701 | [0.0462, 0.0971] | – |
+| D2 | 0.0701 | [0.0462, 0.0971] | +0.0000 |
+| D3 | 0.0541 | [0.0382, 0.0717] | −0.0159 |
+| D4 | 0.0939 | [0.0669, 0.1258] | +0.0239 |
+| D5 | 0.0334 | [0.0191, 0.0510] | **−0.0366** |
+| S5 | 0.0764 | [0.0557, 0.0987] | +0.0064 |
+
+D5 − D1 has paired 95% interval [−0.0685, −0.0080], supporting a difference between these two endpoint scales under the reported procedure. It does not establish a steady decrease with scale. (D1 and D2 report identical values and intervals in the saved table; this is unexplained and worth verifying.)
+
+### Stress period (descriptive)
+
+The stress comparison fits marginals to 2015-2019, carries them through January 2020, and applies them to the **104** aligned observations from February to June 2020. Wavelet components use data through June, so this is not a sequence of real-time stress forecasts. Coefficients rise at every scale at q = 0.10. Because stress-period PITs use pre-stress transformations, the changes combine altered marginal exceedance rates with joint co-movement and should **not** be read as pure copula-dependence changes.
+
+### Robustness (D5 − D1, first forecast training window)
+
+Common 252-date evaluation period 2018-12-24 to 2019-12-23; dependence comparison uses the first 1,000 training observations (ending 21 Dec 2018) with 500 resamples. This differs from the 2015-2019 sample and 2,000 resamples above.
+
+| Case | Change | D5 − D1 | 95% interval | p-value |
+| :-- | :-- | :-- | :-- | :-- |
+| Baseline | – | −0.032 | [−0.069, 0.004] | 0.088 |
+| A | `TAIL_QUANTILE = 0.90` | −0.044 | [−0.081, −0.010] | 0.016 |
+| B | `TRAIN_WINDOW = 750` | −0.064 | [−0.108, −0.029] | 0.000 |
+| C | `N_SIM = 1000` | −0.032 | [−0.069, 0.004] | 0.088 |
+| D | `SEED = 99` | −0.032 | [−0.065, −0.002] | 0.044 |
+
+All point estimates have D1 above D5. The baseline and Monte Carlo intervals include zero; the EVT, shorter-window and seed-99 intervals exclude it. The seed-only change illustrates bootstrap sensitivity. Changing the Monte Carlo count does not change the empirical dependence estimates, as expected. **Legacy robustness ES scores are excluded** because alternative-case daily forecasts were not saved for rescoring.
 
 ---
 
-## Portfolio Universe
+## Recommendation
 
-The portfolio incorporates 5 liquid proxy instruments spanning distinct risk factors and economic regimes from 2015 to 2025:
+For this portfolio proxy and the archived evaluation:
 
-| Ticker | Asset Class | Primary Risk Factor | Economic Role in Challenge |
-| :--- | :--- | :--- | :--- |
-| **SPY** | US Equities (S&P 500) | Equity Market Risk / Beta | Core traditional risk asset |
-| **IEF** | US Treasury (7-10 Year) | Duration / Interest Rate | Safe-haven flight-to-safety asset |
-| **GLD** | Physical Gold | Real Rates / Inflation Hedge | Non-yielding crisis store of value |
-| **USO** | Crude Oil | Commodity / Energy Demand | Supply shock / industrial activity driver |
-| **BTC-USD** | Bitcoin | Crypto / Liquidity Sentiment | High-volatility alternative macro asset |
+1. **Retain M0 historical simulation** as the primary risk-monitoring baseline, with **M1 as a comparator**. M0 satisfies the calibration filters, has the breach rate closest to 1%, and the lowest corrected FZ0 among eligible models. Treat M0's small loss edge over M1 as a conditional selection result.
+2. **Use multiscale analysis as a diagnostic** to flag periods when diversification appears weaker, **not** to reduce risk limits. Current M2/M3 VaR and ES values are too small.
+3. **Before reconsidering M2/M3 for operational forecasting:** update conditional states between refits, repair AR mean-parameter handling, verify and log the copula backend, and rerun the complete out-of-sample experiment with recorded dependencies. Support any calibration change with subsequent evaluation rather than accepting a model because it is more complex.
 
-*Weights*: Equal-weighted ($w_i = 0.20$), rebalanced daily.
+**Limits of the evidence.** Equal-weighted liquid proxies and a weighted-log-return approximation; liquidity, trading costs and capital requirements are not modelled. The ordinary bootstrap ignores serial dependence (a block bootstrap and common-sample comparison would strengthen inference). Stress has only 104 observations. Pairwise effects are heterogeneous. No significance test is provided for the corrected score differences. Conclusions describe the archived implementation and forecasts, not an idealized fully updated wavelet-vine model.
 
 ---
 
-## Installation & Reproduction
+## Known Issues & Reproducibility Status
 
-### Prerequisites
-- Python 3.10, 3.11, 3.12, or 3.13
-- Git
+| Issue | Where | Status |
+| :-- | :-- | :-- |
+| **FZ0 sign error** | `src/backtests.py` (`term1` positive) | Documented in the report; correction rescored saved forecasts and changes the selected model from M1 to M0. **Apply the fix and regenerate** so `final_validation_summary.*`, `final_competition_comparison.csv` and generated recommendations agree with this README. |
+| **AR mean parameters** | `src/marginals.py` (`_get_param` lookups `mu`/`constant`/`c`, `ar[1]`) | Candidate names omit `arch`'s usual labels (e.g. `Const`), so the fitted AR mean may not be restored in forecasts. Requires regenerating forecasts. |
+| **Frozen state between refits** | `src/backtest.py`, `src/models.py` | Mean/volatility held up to 21 days. |
+| **Copula backend not logged** | `src/copulas.py` | Exceptions suppressed; vine vs Gaussian fallback not recorded. |
+| **Exploratory bootstrap** | `src/tail_dependence.py` | iid row resampling; no block bootstrap. |
+| **Dependencies unpinned** | `requirements.txt` | Lower bounds only; exact library versions are not recorded. |
+| **Manifest checksum** | `results/run_manifest.json` | The original data digest differs from a re-serialization of the cached file in the audit environment; use a byte-level checksum and a fixed environment for a fresh reproducible run. |
 
-### 1. Clone & Install Dependencies
+**What was independently checked (per the report):** date alignment; realized returns vs cached weighted-return series; recomputed breach counts and coverage/independence statistics; reconstructed M0 VaR/ES forecasts from cached returns using the implemented refit schedule (max absolute error < 1.1e-16); rescoring of all four models with the corrected FZ0; aggregate dependence point estimates vs the mean of saved pairwise event counts. Source commit: `c1310e8508da0a6a8e7dcb73f6c0f12e2f95c9ad`.
+
+**Not independently regenerated:** the full M1-M3 model fits and the bootstrap confidence intervals (source analysis tables are preserved in the evidence pack). One-command end-to-end reproduction of the report remains to be confirmed after the remaining fixes.
+
+---
+
+## Installation & Usage
+
 ```bash
 git clone https://github.com/imaadh-ifthi/saifa_tiramisu.git
 cd saifa_tiramisu
-
 pip install -r requirements.txt
 ```
 
-### 2. Fast Smoke Test (~30 seconds)
-Runs a 60-day out-of-sample backtest with 3 wavelet scales and 1,000 Monte Carlo draws:
-```bash
-python main.py --quick
-```
+| Command | Purpose |
+| :-- | :-- |
+| `python main.py --quick` | Smoke test (750-day window, 60 test days, 3 scales, 1,000 draws) |
+| `python main.py` | **Archived configuration:** all out-of-sample days (1,764), 5 scales, 2,000 draws; also runs the horizon analysis and robustness suite |
+| `python main.py --full` | 10,000 draws. **Not** the archived configuration |
+| `python main.py --refresh` | Re-downloads data; may change the data snapshot |
 
-### 3. Full Production Backtest
-Runs the full 252-day out-of-sample backtest with 5 wavelet scales and 2,000 Monte Carlo draws:
-```bash
-python main.py
-```
-
-### 4. Heavy Multi-Year Benchmark
-Runs an expanding multi-year backtest (2018–2025) with 10,000 Monte Carlo draws:
-```bash
-python main.py --full
-```
+The default run uses the included return cache in `data/portfolio_returns.csv`. Each run deletes known generated artifacts first and writes `results/run_manifest.json` (data hash, date range, parameters). A `tests/` folder (wavelet decomposition, cross-scale coupling, tail dependence, lower-tail PIT, ablation, final validation) is included; run with `pytest tests/` after installing `pytest`.
 
 ---
 
 ## CLI Reference
 
-`main.py` provides flexible command-line arguments to tailor backtest parameters:
-
-```bash
-python main.py [OPTIONS]
-```
-
 | Argument | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--quick` | flag | `False` | Run fast smoke test (750-day train window, 60 test days, 3 scales, $N_{\text{sim}} = 1000$). |
-| `--full` | flag | `False` | Run heavy full-sample backtest through 2025 with $N_{\text{sim}} = 10000$. |
-| `--levels` | int | `5` | Number of wavelet detail scales ($D_1, \dots, D_J$). |
-| `--test-days` | int | `252` | Number of out-of-sample evaluation days. |
-| `--simulations` | int | `2000` | Monte Carlo copula simulations per day. |
-| `--refit-every` | int | `21` | Frequency of copula and GARCH refitting in trading days (~monthly). |
-| `--train-window` | int | `1000` | Length of rolling training window in trading days (~4 years). |
-| `--refresh` | flag | `False` | Force re-download of Yahoo Finance price data. |
+| :-- | :-- | :-- | :-- |
+| `--quick` | flag | off | Smoke test settings |
+| `--full` | flag | off | 5 scales, all OOS days, 10,000 draws |
+| `--levels` | int | `5` | Number of wavelet detail scales |
+| `--test-days` | int | all days | Limit OOS days |
+| `--simulations` | int | `2000` | Monte Carlo draws per forecast |
+| `--refit-every` | int | `21` | Refit frequency (trading days) |
+| `--train-window` | int | `1000` | Trailing training window |
+| `--refresh` | flag | off | Force data re-download |
 
 ---
 
 ## Project Directory Layout
 
 ```text
-quant_edge_wavelet_copula/
-│
-├── main.py                               # CLI entrypoint and orchestrator
-├── config.py                             # Central configuration parameters
-├── requirements.txt                      # Project dependencies
-├── README.md                             # Comprehensive technical documentation
-│
+saifa_tiramisu/
+├── main.py                 # Entry point: validation, backtest, report, robustness
+├── config.py               # Configuration
+├── requirements.txt
+├── README.md
 ├── src/
-│   ├── __init__.py                       # Package definition
-│   ├── data.py                           # Yahoo Finance data loader with local CSV caching
-│   ├── modwt.py                          # Additive multiresolution wavelet decomposition (MODWT)
-│   ├── marginals.py                      # AR(1)-GARCH(1,1) + EVT GPD tail splicing & PIT
-│   ├── copulas.py                        # Regular vine copula with Gaussian fallback
-│   ├── models.py                         # MultiScaleWaveletVine & GaussianAggregateBenchmark
-│   ├── risk.py                           # VaR and Expected Shortfall calculation engine
-│   ├── backtests.py                      # Kupiec, Christoffersen, Fissler-Ziegel, Diebold-Mariano tests
-│   ├── backtest.py                       # Rolling out-of-sample backtesting loop
-│   ├── utils.py                          # Linear algebra and positive-definite matrix regularizers
-│   └── report.py                         # Statistical summarizer, PNG figure & CSV generator
-│
-├── data/                                 # Auto-generated: stores cached portfolio_returns.csv
-└── results/                              # Auto-generated: outputs, metrics, and plots
-    ├── backtest_results.csv              # Daily realized returns and model forecasts
-    ├── tail_dependence_by_scale.csv      # Lower & upper tail dependence across scales
-    ├── summary.txt                       # Formal statistical results and risk recommendation
-    ├── tail_dependence_by_horizon.png    # Tail dependence vs. investment scale plot
-    ├── var_forecasts.png                 # Time series of returns vs. 99% VaR thresholds
-    └── fissler_ziegel_cumulative_loss.png# Cumulative FZ joint loss over time
+│   ├── data.py             # Yahoo Finance loader with CSV cache
+│   ├── modwt.py            # Normalized SWT-based additive decomposition
+│   ├── marginals.py        # AR(1)-GARCH(1,1) + EVT, PIT / inverse PIT
+│   ├── copulas.py          # Vine copula with Gaussian fallback
+│   ├── cross_scale.py      # Cross-scale Gaussian coupler
+│   ├── models.py           # M0 historical sim, M1 heavy-tail, wavelet-vine (M2/M3)
+│   ├── tail_dependence.py  # Empirical tail dependence, bootstrap, FDR, stress
+│   ├── robustness.py       # Robustness cases
+│   ├── risk.py             # VaR and ES
+│   ├── backtests.py        # Kupiec, Christoffersen, FZ0, Diebold-Mariano
+│   ├── backtest.py         # Rolling out-of-sample loop (M0-M3)
+│   ├── report.py           # Summaries and figures
+│   └── utils.py
+├── tests/
+├── data/                   # Cached portfolio_returns.csv
+└── results/                # Generated outputs (CSVs, figures, run_manifest.json)
 ```
 
----
-
-## Concrete Risk Manager Recommendations
-
-The following actionable rules are derived from our empirical findings for Chief Risk Officers (CROs) and Quantitative Portfolio Managers:
-
-1. **Abandon Monolithic Dependence Assumptions**:
-   - Correlation and tail dependence are not scale-invariant. Measuring risk purely on aggregate daily returns overstates diversification benefits during sustained, multi-week drawdowns.
-2. **Decouple Liquidity Limits from Capital Buffers**:
-   - High-frequency risk metrics ($D_1\text{--}D_2$, 1–4 days) should govern intraday margin, trade sizing, and liquidity buffers.
-   - Low-frequency Expected Shortfall estimates ($D_5\text{--}S_5$, 16–32+ days) must size strategic tail hedges, capital adequacy buffers, and drawdown draw-stops.
-3. **Guard Against the Gaussian Underestimation Gap**:
-   - If the aggregate Gaussian 99% Expected Shortfall is ~2.7% while the multiscale wavelet-vine estimate is ~7.1%, relying on the aggregate benchmark creates a **160%+ tail undercapitalization**. Stress testing must incorporate scale-dependent tail estimates.
-4. **Dynamic Tail Hedge Triggering**:
-   - Review and scale up hedge ratios whenever low-frequency lower tail dependence ($\lambda_{L, \text{long}}$) materially exceeds high-frequency tail dependence ($\lambda_{L, \text{short}}$), as this signals systemic cross-asset contagion.
+`recover.py` and `scratch_test.py` are development scripts; remove them before final submission if not needed.
 
 ---
 
 ## AI Disclosure
 
-In accordance with competition guidelines, AI programming assistants were utilized for scaffolding initial template scripts, debugging syntax, and drafting markdown documentation. All mathematical derivations, methodological architectures, algorithmic implementations, and empirical interpretations were verified and validated by the team.
+AI tools assisted with learning, report drafting, code review, debugging and evidence checks. The review identified the scoring-sign error and helped implement regression checks. The team remains responsible for the final code, assumptions, calculations and interpretation, and must be able to explain or modify the work live as required by the competition.
