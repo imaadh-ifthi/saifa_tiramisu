@@ -121,6 +121,21 @@ def save_report(results: pd.DataFrame, tail_df: pd.DataFrame, cfg):
         kt = kupiec_test(actual, var_forecast, cfg.ALPHA)
         ct = christoffersen_test(actual, var_forecast, cfg.ALPHA)
         fz = fissler_ziegel_loss(actual, var_forecast, es_forecast, cfg.ALPHA)
+        coverage_ok = bool(kt["p_value"] >= 0.05)
+        independence_ok = bool(ct["p_value"] >= 0.05)
+        if coverage_ok and independence_ok:
+            eligibility = "Eligible"
+            eligibility_reason = "Passed coverage and independence tests"
+        elif not coverage_ok and not independence_ok:
+            eligibility = "Ineligible"
+            eligibility_reason = "Failed unconditional coverage and independence tests"
+        elif not coverage_ok:
+            eligibility = "Ineligible"
+            eligibility_reason = "Failed unconditional coverage test"
+        else:
+            eligibility = "Ineligible"
+            eligibility_reason = "Failed independence test"
+
         summary_records.append({
             "model": m,
             "model_name": model_labels[m],
@@ -135,6 +150,8 @@ def save_report(results: pd.DataFrame, tail_df: pd.DataFrame, cfg):
             "coverage_test_pvalue": kt["p_value"],
             "independence_test_statistic": ct["stat"],
             "independence_test_pvalue": ct["p_value"],
+            "eligibility": eligibility,
+            "eligibility_reason": eligibility_reason,
             "es_score": float(np.mean(np.nan_to_num(fz, nan=1e6, posinf=1e6, neginf=1e6))),
         })
 

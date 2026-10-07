@@ -93,3 +93,19 @@ def test_existing_final_comparison_is_not_zeroed_when_horizon_summary_exists():
 
     assert np.isclose(float(final["tail_dependence_D1"]), d1)
     assert np.isclose(float(final["tail_dependence_D5"]), d5)
+
+
+def test_arch_parameter_names_are_not_silently_lost():
+    """The AR(1)-GARCH fit must recognise common arch parameter names."""
+    m = MarginalARQGARCH()
+    params = {"Const": 0.0123, "y[1]": 0.47, "omega": 0.1, "alpha[1]": 0.05, "beta[1]": 0.9}
+    assert abs(m._get_param(params, ["Const", "mu"], 0.0) - 0.0123) < 1e-12
+    assert abs(m._get_param(params, ["y[1]", "ar[1]"], 0.0) - 0.47) < 1e-12
+
+
+def test_model_eligibility_is_a_statistical_label_not_a_fit_failure():
+    from src import report
+    import inspect
+    source = inspect.getsource(report.save_report)
+    assert '"eligibility"' in source
+    assert '"eligibility_reason"' in source

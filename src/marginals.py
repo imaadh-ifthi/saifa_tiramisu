@@ -34,6 +34,8 @@ class MarginalARQGARCH:
         self.last_y = None
         self.last_eps = None
         self.last_sigma2 = None
+        self.garch_converged = False
+        self.garch_param_names = []
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -61,13 +63,18 @@ class MarginalARQGARCH:
         return z, mu, var_next, float(sigma2[-1])
 
     def _get_param(self, params: dict, candidates, default: float) -> float:
+        """Robust, case-insensitive parameter extraction from ``arch`` output.
+
+        ``arch`` commonly names the AR(1) mean parameters ``Const`` and ``y[1]``
+        rather than ``mu`` and ``ar[1]``. Older code could therefore silently
+        replace a fitted non-zero mean/AR term with zero.
         """
-        Robust parameter extraction from arch model params.
-        """
+        normalized = {str(k).strip().lower(): v for k, v in params.items()}
         for key in candidates:
-            if key in params:
+            k = str(key).strip().lower()
+            if k in normalized:
                 try:
-                    return float(params[key])
+                    return float(normalized[k])
                 except Exception:
                     continue
         return float(default)
@@ -149,9 +156,16 @@ class MarginalARQGARCH:
                 raise RuntimeError("GARCH optimizer failed to converge.")
 
             params = res.params.to_dict()
+            self.garch_param_names = list(params.keys())
 
-            mu = self._get_param(params, ["mu", "constant", "c"], 0.0)
-            phi = self._get_param(params, ["ar[1]", "ar[1]", "lag[1]"], 0.0)
+            # ``arch``'s AR(1) mean specification normally uses ``Const`` and
+            # ``y[1]``. Keep compatibility with other versions/naming schemes.
+            mu = self._get_param(
+                params, ["Const", "mu", "constant", "c", "intercept"], 0.0
+            )
+            phi = self._get_param(
+                params, ["y[1]", "ar[1]", "ar.L1", "lag[1]"], 0.0
+            )
             omega = self._get_param(params, ["omega"], np.var(y) * 0.05)
             alpha = self._get_param(params, ["alpha[1]", "alpha"], 0.05)
             beta = self._get_param(params, ["beta[1]", "beta"], 0.90)
@@ -187,6 +201,7 @@ class MarginalARQGARCH:
 
             z = std_resid
             self.vol_method = "garch"
+            self.garch_converged = True
             self.mu_y = float(mu)
             self.phi = float(phi)
             self.omega = float(omega)
@@ -204,6 +219,7 @@ class MarginalARQGARCH:
             mean_next_y = mu_y
             var_next_y = max(float(var_next_y), 1e-12)
             self.vol_method = "ewma"
+            self.garch_converged = False
             self.mu_y = float(mu_y)
             self.phi = 0.0
             self.omega = None
@@ -423,6 +439,20 @@ class MarginalARQGARCH:
             z[interior_mask] = np.quantile(self.interior, q)
 
         return z
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+    def diagnostics(self) -> dict:
+        """Return auditable marginal-fit diagnostics for reports/tests."""
+        return {
+            "vol_method": self.vol_method,
+            "garch_converged": bool(self.garch_converged),
+            "garch_param_names": list(self.garch_param_names),
+            "phi": float(self.phi),
+            "forecast_mean": float(self.forecast_mean),
+            "forecast_sigma": float(self.forecast_sigma),
+        }
 
     # ------------------------------------------------------------------
     # Forecast one-step component from uniform draws

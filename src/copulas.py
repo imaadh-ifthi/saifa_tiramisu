@@ -34,6 +34,7 @@ class VineCopulaModel:
     def __init__(self):
         self.kind = "none"
         self.dim = None
+        self.fallback_reason = None
 
     # ------------------------------------------------------------------
     # Fit
@@ -84,11 +85,12 @@ class VineCopulaModel:
 
                 self.vine = vine
                 self.kind = "vine"
+                self.fallback_reason = None
 
                 return self
 
-            except Exception:
-                pass
+            except Exception as exc:
+                self.fallback_reason = f"vine_fit_failed: {type(exc).__name__}: {exc}"
 
         # ------------------------------------------------------------
         # Gaussian copula fallback
@@ -103,6 +105,8 @@ class VineCopulaModel:
 
         self.corr = regularize_corr(corr)
         self.kind = "gaussian"
+        if self.fallback_reason is None:
+            self.fallback_reason = "vine_unavailable_or_insufficient_sample"
 
         return self
 
