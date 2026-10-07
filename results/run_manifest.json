@@ -1,6 +1,6 @@
 {
   "data_source": "Yahoo Finance (via yfinance)",
-  "data_sha256": "60fe5c30013ee5fc7a3d6f42e5a05ed7718a359dbd9cc8924e57e5f2599faafe",
+  "data_sha256": "b2e0f0db856377b66313320c42426ac59efa5b88deb085acaef256341c8b1994",
   "assets": [
     "SPY",
     "IEF",

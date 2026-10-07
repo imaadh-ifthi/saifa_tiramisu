@@ -135,7 +135,7 @@ def fissler_ziegel_loss(
 
     indicator = (actual <= var_forecast).astype(float)
 
-    term1 = (indicator / (alpha * es_safe)) * (var_forecast - actual)
+    term1 = -(indicator / (alpha * es_safe)) * (var_forecast - actual)
     term2 = var_forecast / es_safe
     term3 = np.log(-es_safe) - 1.0
 

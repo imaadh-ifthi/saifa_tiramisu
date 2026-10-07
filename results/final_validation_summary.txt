@@ -7,19 +7,19 @@ OOS Start: 2018-12-24
 OOS End: 2025-12-30
 
 --- HORIZON EVIDENCE ---
-Evidence supports lower lower-tail dependence at D5 than D1 (delta=-0.0366, 95% CI [-0.0685, -0.0080]).
+Evidence supports lower lower-tail dependence at D5 than D1 (delta=-0.0303, 95% CI [-0.0621, -0.0016]).
 
 --- MODEL COMPARISON ---
-M0: breach_rate=0.0119, avg_VaR=-0.0317, avg_ES=-0.0536, coverage_p=0.435047, independence_p=0.249353, FZ_score=-3.8875
-M1: breach_rate=0.0136, avg_VaR=-0.0294, avg_ES=-0.0385, coverage_p=0.149078, independence_p=0.415689, FZ_score=-4.2653
-M2: breach_rate=0.0771, avg_VaR=-0.0139, avg_ES=-0.0161, coverage_p=4.22917e-73, independence_p=0.00155335, FZ_score=-9.4896
-M3: breach_rate=0.0720, avg_VaR=-0.0146, avg_ES=-0.0170, coverage_p=5.84852e-65, independence_p=0.00448398, FZ_score=-8.8381
+M0: breach_rate=0.0119, avg_VaR=-0.0317, avg_ES=-0.0536, coverage_p=0.435047, independence_p=0.249353, FZ_score=-2.8080
+M1: breach_rate=0.0136, avg_VaR=-0.0294, avg_ES=-0.0385, coverage_p=0.149078, independence_p=0.415689, FZ_score=-2.7862
+M2: breach_rate=0.0777, avg_VaR=-0.0139, avg_ES=-0.0162, coverage_p=5.06097e-74, independence_p=0.0046972, FZ_score=0.7863
+M3: breach_rate=0.0709, avg_VaR=-0.0147, avg_ES=-0.0171, coverage_p=3.43995e-63, independence_p=0.00113419, FZ_score=0.2343
 
 --- MODEL SELECTION RULE ---
 Eligible models require coverage and independence p-values >= 0.05; among eligible models, lower Fissler-Ziegel score is preferred.
 
 --- RISK-MANAGER RECOMMENDATION ---
-Recommendation: use M1 (Heavy-Tail Marginals) as the primary 99% VaR/ES risk model under the tested portfolio and OOS setting. The observed evidence indicates: Evidence supports lower lower-tail dependence at D5 than D1 (delta=-0.0366, 95% CI [-0.0685, -0.0080]). Use the multiscale model as an analytical diagnostic for horizon dependence rather than as the production risk forecast unless future validation shows materially better calibration.
+Recommendation: use M0 (Historical Simulation Benchmark) as the primary 99% VaR/ES risk model under the tested portfolio and OOS setting. The observed evidence indicates: Evidence supports lower lower-tail dependence at D5 than D1 (delta=-0.0303, 95% CI [-0.0621, -0.0016]). Use the multiscale model as an analytical diagnostic for horizon dependence rather than as the production risk forecast unless future validation shows materially better calibration.
 
 --- LIMITATIONS ---
 99% VaR backtests have limited statistical power when the OOS sample is short; interpret p-values alongside breach counts and ES scores.
