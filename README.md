@@ -373,7 +373,7 @@ Do not silently replace archived numbers with a newly generated run: record the 
 ### Install
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/imaadh-ifthi/saifa_tiramisu.git
 cd saifa_tiramisu
 python -m venv .venv
 
